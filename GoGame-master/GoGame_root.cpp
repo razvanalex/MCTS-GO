@@ -12,6 +12,8 @@
 
 using namespace std;
 
+#define LOG 1
+
 void timing(double *wcTime, double *cpuTime) {
     struct timeval tp;
     struct rusage ruse;
@@ -42,12 +44,14 @@ public:
         ko_col = -1;
         ko_turn = 0;
         win_player = 0;
+
         for (int i = 0; i < 9; ++i) {
             vector<int> tmp;
             for (int i = 0; i < 9; ++i)
                 tmp.push_back(0);
             board.push_back(tmp);
         }
+
         for (int i = 0; i < 9; ++i) {
             vector<bool> tmp;
             for (int i = 0; i < 9; ++i)
@@ -65,6 +69,7 @@ public:
         ko_turn = t.ko_turn;
         win_player = t.win_player;
         player = t.player;
+
         for (int i = 0; i < 9; ++i) {
             vector<bool> tmp;
             for (int i = 0; i < 9; ++i)
@@ -76,6 +81,7 @@ public:
     Position(vector<vector<int>> board_, int p) {
         player = p;
         board = board_;
+
         for (int i = 0; i < 9; ++i) {
             vector<bool> tmp;
             for (int i = 0; i < 9; ++i)
@@ -104,12 +110,13 @@ public:
             }
 
             int stone_num = 0;
-
             int t = count_eyes_zero(row, col, player, stone_num);
+
             if (t == 0 || (t == 1 && stone_num > 5)) {
                 board = tmp.board;
                 return false;
             }
+
             board = tmp.board;
             player = tmp.player;
             return true;
@@ -123,9 +130,10 @@ public:
             ko_col = -1;
             return -2;
         }
-        if (board[row][col] != 0 || (row == ko_row && col == ko_col))
+
+        if (board[row][col] != 0 || (row == ko_row && col == ko_col)) {
             return -1;
-        else {
+        } else {
             vector<vector<int>> tmp_board = board;
             int ko_turn_ = ko_turn;
             int ko_row_ = ko_row;
@@ -134,6 +142,7 @@ public:
             board[row][col] = player;
             ko_row = -1;
             ko_col = -1;
+
             if (count_eyes(row + 1, col, -player) == 0) {
                 if (remove_stone(-player) == 1) {
                     ko_row = row + 1;
@@ -164,8 +173,8 @@ public:
             }
 
             int stone_num = 0;
-
             int t = count_eyes_zero(row, col, player, stone_num);
+
             if (t == 0 || (t == 1 && stone_num > 5)) {
                 board = tmp_board;
                 ko_row = ko_row_;
@@ -177,10 +186,12 @@ public:
             if (ko_row == -1)
                 ko_turn = 0;
         }
+
         if (player == 1)
             player1_pass = false;
         else
             player2_pass = false;
+        
         player = -player;
         return 0;
     }
@@ -192,11 +203,9 @@ public:
         for (int i = 0; i < 9; ++i)
             for (int j = 0; j < 9; ++j) {
                 if (is_valid(i, j)) {
-
                     return false;
                 }
             }
-
         return true;
     }
 
@@ -231,6 +240,7 @@ public:
                         player2_res++;
                     if (board[i][j] == 0) {
                         bool player1_stone = false, player2_stone = false, blank = false;
+                        
                         if (i - 1 >= 0) {
                             if (board[i - 1][j] == 1)
                                 player1_stone = true;
@@ -286,17 +296,20 @@ public:
                 win_player = 1;
             else
                 win_player = -1;
-            //cout << "player1: " << player1_res << " player2: "<< player2_res << " " << win_player << endl;
+            // cout << "player1: " << player1_res << " player2: "<< player2_res << " " << win_player << endl;
         }
         return player1_pass && player2_pass;
     }
 
     int who_win() {
-        //cout << win_player << endl;
+        // cout << win_player << endl;
         return win_player;
     }
 
-    void print() const {
+    void print() {
+        if (!LOG)
+            return;
+
         cout << "-------------------------" << endl;
         cout << "  0 1 2 3 4 5 6 7 8" << endl;
         for (int i = 0; i < 9; ++i) {
@@ -343,11 +356,13 @@ private:
     int count_eyes(int row, int col, int player_) {
         if (row < 0 || row > 8 || col < 0 || col > 8 || board[row][col] != player_)
             return -1;
+    
         for (int i = 0; i < 9; ++i) {
             for (int j = 0; j < 9; ++j) {
                 is_visit[i][j] = false;
             }
         }
+
         int res = 0;
         dfs(row, col, board[row][col], res);
         //cout << "----" << res << "----"<< endl;
@@ -357,6 +372,7 @@ private:
     void dfs(int row, int col, int player_, int &res) {
         if (row < 0 || row > 8 || col < 0 || col > 8 || is_visit[row][col] == true || board[row][col] == -player_)
             return;
+    
         is_visit[row][col] = true;
         if (board[row][col] == player_) {
             dfs(row + 1, col, player_, res);
@@ -364,6 +380,7 @@ private:
             dfs(row, col + 1, player_, res);
             dfs(row, col - 1, player_, res);
         }
+
         if (board[row][col] == 0) {
             res += 1;
         }
@@ -372,11 +389,13 @@ private:
     int count_eyes_zero(int row, int col, int player_, int &stone_num) {
         if (row < 0 || row > 8 || col < 0 || col > 8 || board[row][col] != player_)
             return 10;
+
         for (int i = 0; i < 9; ++i) {
             for (int j = 0; j < 9; ++j) {
                 is_visit[i][j] = false;
             }
         }
+
         int res = 0;
         stone_num = dfs_fast_end(row, col, board[row][col], res);
         //cout << "----" << res << "----"<< endl;
@@ -386,6 +405,7 @@ private:
     int dfs_fast_end(int row, int col, int player_, int &res) {
         if (res > 1 || row < 0 || row > 8 || col < 0 || col > 8 || is_visit[row][col] == true || board[row][col] == -player_)
             return 0;
+    
         is_visit[row][col] = true;
         if (board[row][col] == player_) {
             return dfs_fast_end(row + 1, col, player_, res) +
@@ -393,9 +413,11 @@ private:
                    dfs_fast_end(row, col + 1, player_, res) +
                    dfs_fast_end(row, col - 1, player_, res) + 1;
         }
+
         if (board[row][col] == 0) {
             res += 1;
         }
+
         return 0;
     }
 
@@ -425,7 +447,8 @@ public:
         total_game = g;
     }
     void print() {
-        cout << total_game << " " << total_win << endl;
+        if (LOG) 
+            cout << total_game << " " << total_win << endl;
     }
 };
 
@@ -450,16 +473,15 @@ void get_next_pos(Position *s, vector<Position> &next_pos) {
 }
 
 namespace std {
-template <>
-struct hash<Position> {
-    size_t
-    operator()(const Position obj) const {
+template <> struct hash<Position> {
+    size_t operator()(const Position obj) const {
         return hash<string>()(obj.to_string());
     }
 };
 } // namespace std
 
 unordered_map<Position, value *> tree;
+
 void random_play(Position *s) {
     if (!s->is_pass()) {
         int x, y;
@@ -484,7 +506,6 @@ void manual_play(Position *s) {
 }
 
 Position *mcts_play(Position *s, int iters, int playout_num, int thread_num) {
-
     int my_player = s->player;
     if (s->is_pass()) {
         s->pass_move();
@@ -547,15 +568,14 @@ Position *mcts_play(Position *s, int iters, int playout_num, int thread_num) {
                     break;
                 } else {
                     //find the best current children, UCTS strategy
-
                     double z = 0.2;
                     value *v = localTrees[threadIndex][*t];
-                    ;
                     double T = v->total_game;
                     if (tree.find(*t) != tree.end())
                         T += tree[*t]->total_game;
                     Position *tmp_pos = NULL;
                     int best_row, best_col;
+
                     if (t->player == my_player) {
                         double ucb = -10000000000000.0;
                         for (int j = 0; j < next_pos.size(); ++j) {
@@ -576,6 +596,7 @@ Position *mcts_play(Position *s, int iters, int playout_num, int thread_num) {
                             }
 
                             double tmp_ucb = pj / nj + sqrt(z * log(T) / nj);
+
                             if (ucb < tmp_ucb) {
                                 ucb = tmp_ucb;
                                 tmp_pos = &next_pos[j];
@@ -601,6 +622,7 @@ Position *mcts_play(Position *s, int iters, int playout_num, int thread_num) {
                             }
 
                             double tmp_ucb = pj / nj - sqrt(z * log(T) / nj);
+    
                             if (ucb > tmp_ucb) {
                                 ucb = tmp_ucb;
                                 tmp_pos = &next_pos[j];
@@ -613,6 +635,7 @@ Position *mcts_play(Position *s, int iters, int playout_num, int thread_num) {
                         localTrees[threadIndex][*tmp_pos] = new value(v, 0.0, 0.0);
                     if (t != s_)
                         delete t;
+
                     t = new Position(*tmp_pos);
                 }
             }
@@ -631,10 +654,9 @@ Position *mcts_play(Position *s, int iters, int playout_num, int thread_num) {
                     total_w = 0;
                 }
             } else {
-                int j;
-                for (j = 0; j < playout_num; ++j) {
-
+                for (int j = 0; j < playout_num; ++j) {
                     Position *tt = new Position(*t);
+
                     while (!tt->game_over()) {
                         if (!tt->is_pass()) {
                             int x, y;
@@ -675,6 +697,7 @@ Position *mcts_play(Position *s, int iters, int playout_num, int thread_num) {
             v_->total_game += total_g;
             v_->total_win += total_w;
             int loop_num = 0;
+    
             while (v_ != root_v && loop_num++ < 500) {
                 v_ = v_->last_pos_value;
                 v_->total_game += total_g;
@@ -704,11 +727,12 @@ Position *mcts_play(Position *s, int iters, int playout_num, int thread_num) {
     get_next_pos(s, next_pos);
     double average = -10.0;
     int index = -1;
-    //cout << "--------" << endl;
+    // cout << "--------" << endl;
+
     for (int i = 0; i < next_pos.size(); ++i) {
         if (tree.find(next_pos[i]) != tree.end()) {
             value *v = tree[next_pos[i]];
-            //cout << v->total_game <<" " << v->total_win << endl;
+            // cout << v->total_game <<" " << v->total_win << endl;
             if (average < v->total_win / v->total_game) {
                 average = v->total_win / v->total_game;
                 index = i;
@@ -730,7 +754,6 @@ int main(int argc, char **argv) {
     int round_num = 0;
 
     int playout_num, iteration, thread_num;
-
     if (argc != 4) {
         cout << "usage: <iteration> <playout_num> <thread>" << endl;
         return 0;
@@ -743,9 +766,10 @@ int main(int argc, char **argv) {
 
     timing(times1, times1 + 1);
     while (!s->game_over()) {
-        // cout << "----- round: " << round_num << " ------" << endl;
+         if (LOG)
+            cout << "----- round: " << round_num << " ------" << endl;
         s = mcts_play(s, iteration, playout_num, thread_num);
-        s->print();
+        // s->print();
         round_num += 1;
         if (s->game_over())
             break;
@@ -754,7 +778,8 @@ int main(int argc, char **argv) {
     }
     timing(times2, times2 + 1);
 
-    // cout << "Average time of one step: " << (times2[0] - times1[0]) / round_num << "s." << endl;
+    if (LOG)
+        cout << "Average time of one step: " << (times2[0] - times1[0]) / round_num << "s." << endl;
 
     delete s;
     return 0;
