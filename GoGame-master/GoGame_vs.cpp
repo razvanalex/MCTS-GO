@@ -10,12 +10,13 @@
 #include <unordered_map>
 #include <vector>
 
-#define THREAD_NUM 4
-#define TIME_PER_ROUND 1	// The time per round in seconds. Default was 30.
-
 using namespace std;
 
+#define THREAD_NUM 1
+#define TIME_PER_ROUND 1	// The time per round in seconds. Default was 30.
+#define ITERS 10
 #define LOG 1
+
 
 void timing(double *wcTime, double *cpuTime) {
     struct timeval tp;
@@ -534,7 +535,7 @@ Position *mcts_play_root(Position *s, int playout_num) {
         vector<Position> next_pos = next_poss[threadIndex];
         Position *s_ = new Position(*s);
 
-        do {
+        for (int i = 0; i < ITERS; ++i) {
             t = s_;
 
             while (!t->game_over()) {
@@ -712,7 +713,7 @@ Position *mcts_play_root(Position *s, int playout_num) {
             }
 
             timing(&time2, &time_);
-        } while (time2 - time1 < TIME_PER_ROUND);
+        } // while (time2 - time1 < TIME_PER_ROUND);
         delete s_;
     }
     //merge local trees to global trees
@@ -786,7 +787,7 @@ Position *mcts_play_leaf(Position *s, int playout_num) {
     bool all_in;
     Position *t;
 
-    do {
+    for (int i = 0; i < ITERS; ++i) {
         t = s;
         while (!t->game_over()) {
             all_in = true;
@@ -911,7 +912,7 @@ Position *mcts_play_leaf(Position *s, int playout_num) {
 
         timing(&time2, &time_);
 
-    } while (time2 - time1 < TIME_PER_ROUND);
+    } // while (time2 - time1 < TIME_PER_ROUND);
     //choose the best move;
 
     vector<Position> next_pos;
@@ -964,7 +965,8 @@ Position *mcts_play_serial(Position *s, int playout_num) {
     bool all_in;
     Position *t;
 
-    do {
+    // do {
+    for (int i = 0; i < ITERS; ++i) {  
         t = s;
         while (!t->game_over()) {
             all_in = true;
@@ -973,7 +975,6 @@ Position *mcts_play_serial(Position *s, int playout_num) {
 
             int index = 0;
             for (int j = 0; j < next_pos.size(); ++j) {
-
                 if (tree.find(next_pos[j]) == tree.end()) {
                     all_in = false;
                     index = j;
@@ -983,7 +984,6 @@ Position *mcts_play_serial(Position *s, int playout_num) {
 
             //if all_in then tree policy else expand and break;
             if (all_in == false) {
-
                 tree[next_pos[index]] = new value(tree[*t], 0.0, 0.0);
                 t = new Position(next_pos[index]);
                 break;
@@ -1087,7 +1087,7 @@ Position *mcts_play_serial(Position *s, int playout_num) {
         }
 
         timing(&time2, &time_);
-    } while (time2 - time1 < TIME_PER_ROUND);
+    } // while (time2 - time1 < TIME_PER_ROUND);
 
     //choose the best move;
     vector<Position> next_pos;
@@ -1119,8 +1119,8 @@ int main(int argc, char **argv) {
     double times1[2];
     double times2[2];
     int round_num = 0, win1 = 0, win2 = 0;
-
     int playout_num, st1, st2;
+
     if (argc != 4) {
         cout << "usage: <playout_num> <strategy1: 0:rand, 1:serial, 2:tree, 3:root, 4:manual> <strategy2: 0, 1, 2, 3, 4>" << endl;
         return 0;
@@ -1130,14 +1130,15 @@ int main(int argc, char **argv) {
     st1 = atoi(argv[2]);
     st2 = atoi(argv[3]);
 
-    //timing(times1, times1 + 1);
-    for (int g = 0; g < 10; ++g) {
+    timing(times1, times1 + 1);
+    for (int g = 0; g < 1; ++g) {
         Position *s = new Position();
-        round_num = 0;
+        round_num = 1;
+
         while (!s->game_over()) {
 			if (LOG) {
-				cout << "----- round: " << round_num << " ------" << endl;
-				// cout << "---" << st1 << "---" << endl;
+				cout << endl << "========= Round: " << round_num << " ==========" << endl;
+				cout << "=== Player 1 - Strategy " << st1 << " ===" << endl;
 			}
 
             if (st1 == 0) {
@@ -1159,9 +1160,12 @@ int main(int argc, char **argv) {
             s->print();
             round_num += 1;
 
-            // 	cout << "---" << st2 << "---" << endl;
+            if (LOG)
+				cout << "=== Player 2 - Strategy " << st2 << " ===" << endl;
+
             if (s->game_over())
                 break;
+
             if (st2 == 0) {
                 random_play(s);
             }

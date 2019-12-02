@@ -8,11 +8,12 @@
 #include <sys/types.h>
 #include <unordered_map>
 #include <vector>
+#include <omp.h>
 
 using namespace std;
 
 #define VISUAL 1    // For visualizing the game
-#define LOG 1       // For printing the average time
+#define LOG 0       // For printing the average time
 
 /**
  * Measures the time.
@@ -593,8 +594,9 @@ void manual_play(Position *s) {
     }
 }
 
-/* The trees used in MCTS. They are pairs of (state, score) */
+/* The trees used in MCTS. It is a pair of (state, score) */
 unordered_map<Position, value *> trees[2];
+unordered_map<Position, value *> *localTrees;
 
 /**
  * This is MCTS play.
@@ -603,7 +605,7 @@ unordered_map<Position, value *> trees[2];
  * @param playout_num The number of simulations in MCTS.
  * @returns A new state after choosing a move.
  */
-Position *mcts_play(Position *s, int iters, int playout_num, unordered_map<Position, value *> &tree) {
+Position *mcts_play(Position *s, int iters, int playout_num, unordered_map<Position, value *> tree, int thread_num) {
     int my_player = s->player;
 
     // The player cannot put a stone. Pass move!
@@ -611,171 +613,207 @@ Position *mcts_play(Position *s, int iters, int playout_num, unordered_map<Posit
         s->pass_move();
         return s;
     }
- 
-    // If 's' (current state) is not in the tree, create the state
-    if (tree.find(*s) == tree.end()) {
-        // Create a linked-list for game scores
-        tree[*s] = new value(NULL, 0, 0);
+    
+    #pragma omp parallel
+    {
+        int threadIndex = omp_get_thread_num();
+        unordered_map<Position, value *> localTree = tree;
+        Position *s_local = new Position(*s);
 
-        // Get the available moves
-        vector<Position> next_pos;
-        get_next_pos(s, next_pos);
+        // If 's' (current state) is not in the tree, create the state
+        if (localTree.find(*s_local) == localTree.end()) {
+            // Create a linked-list for game scores
+            localTree[*s_local] = new value(NULL, 0, 0);
 
-        // For every move, check if the state exists in the tree then update 
-        // the scores for current state
-        value *v = tree[*s];
-        for (int i = 0; i < next_pos.size(); ++i) {
-            if (tree.find(next_pos[i]) != tree.end()) {
-                v->total_game += tree[next_pos[i]]->total_game;
-                v->total_win += tree[next_pos[i]]->total_win;
-            }
-        }
-    }
-
-    value *root_v = tree[*s];
-    bool all_in;
-    Position *t;
-
-    // Run the game 'iters' times
-    for (int i = 0; i < iters; ++i) {
-        t = s;
-
-        // Selection
-        while (!t->game_over()) {
-            all_in = true; // all child nodes are expanded
-
-            // Get next moves
+            // Get the available moves
             vector<Position> next_pos;
-            get_next_pos(t, next_pos);
+            get_next_pos(s_local, next_pos);
 
-            // Search the first move from that is not in the existing tree.
-            // Also, if one move not found, set all_in to false
-            int index = 0;
-            for (int j = 0; j < next_pos.size(); ++j) {
-                if (tree.find(next_pos[j]) == tree.end()) {
-                    all_in = false;
-                    index = j;
+            // For every move, check if the state exists in the tree then update
+            // the scores for current state
+            value *v = localTree[*s_local];
+            for (int i = 0; i < next_pos.size(); ++i) {
+                if (localTree.find(next_pos[i]) != localTree.end()) {
+                    v->total_game += localTree[next_pos[i]]->total_game;
+                    v->total_win += localTree[next_pos[i]]->total_win;
+                }
+            }
+        }
+  
+        bool all_in;
+        value *root_v = localTree[*s_local];
+        Position *t;
+
+        // Run the game 'iters' times
+        #pragma omp for schedule(dynamic)
+        for (int i = 0; i < iters; ++i) {
+            t = s_local;
+
+            // Selection
+            while (!t->game_over()) {
+                all_in = true; // all child nodes are expanded
+
+                // Get next moves
+                vector<Position> next_pos;
+                get_next_pos(t, next_pos);
+
+                // Search the first move from that is not in the existing tree.
+                // Also, if one move not found, set all_in to false
+                int index = 0;
+                for (int j = 0; j < next_pos.size(); ++j) {
+                    if (localTree.find(next_pos[j]) == localTree.end()) {
+                        all_in = false;
+                        index = j;
+                        break;
+                    }
+                }
+
+                // If all_in then tree policy else expand (create a new node) and break
+                if (all_in == false) {
+                    // Explore new state
+                    localTree[next_pos[index]] = new value(localTree[*t], 0.0, 0.0);
+                    t = new Position(next_pos[index]);
                     break;
-                }
-            }
-
-            // If all_in then tree policy else expand (create a new node) and break
-            if (all_in == false) {
-                // Explore new state
-                tree[next_pos[index]] = new value(tree[*t], 0.0, 0.0);
-                t = new Position(next_pos[index]);
-                break;
-            } else {
-                // All child nodes are visited. Find the best current children,
-                // UCTS strategy
-                double z = 0.2;
-                value *v = tree[*t];
-                double T = v->total_game;
-                Position *tmp_pos = NULL;
-                int best_row, best_col;
-
-                // Select next child
-                if (t->player == my_player) {
-                    // For my_player, select the child that maximizes the score
-                    double ucb = -10000000000000.0;
-                    for (int j = 0; j < next_pos.size(); ++j) {
-                        value *vv = tree[next_pos[j]];
-                        double pj = vv->total_win;
-                        double nj = vv->total_game;
-                        double tmp_ucb = pj / nj + sqrt(z * log(T) / nj);
-	
-                        if (ucb < tmp_ucb) {
-                            ucb = tmp_ucb;
-                            tmp_pos = &next_pos[j];
-                        }
-                    }
                 } else {
-                    // For the other player, select the child that minimizes the score
-                    double ucb = 10000000000000.0;
-                    for (int j = 0; j < next_pos.size(); ++j) {
-                        value *vv = tree[next_pos[j]];
-                        double pj = vv->total_win;
-                        double nj = vv->total_game;
-                        double tmp_ucb = pj / nj - sqrt(z * log(T) / nj);
-	
-                        if (ucb > tmp_ucb) {
-                            ucb = tmp_ucb;
-                            tmp_pos = &next_pos[j];
-                        }
-                    }
-                }
+                    // All child nodes are visited. Find the best current children,
+                    // UCTS strategy
+                    double z = 0.2;
+                    value *v = localTree[*t];
+                    double T = v->total_game;
+                    Position *tmp_pos = NULL;
+                    int best_row, best_col;
 
-                // Add to linked-list, the parent value
-                tree[*tmp_pos]->last_pos_value = v;
-                if (t != s)
-                    delete t;
- 
-                // Go to next state
-                t = new Position(*tmp_pos);
-            }
-        }
+                    // Select next child
+                    if (t->player == my_player) {
+                        // For my_player, select the child that maximizes the score
+                        double ucb = -10000000000000.0;
+                        for (int j = 0; j < next_pos.size(); ++j) {
+                            value *vv = localTree[next_pos[j]];
+                            double pj = vv->total_win;
+                            double nj = vv->total_game;
+                            double tmp_ucb = pj / nj + sqrt(z * log(T) / nj);
 
-        // Playout policy: Run some random games and obtain some scores
-        double total_g = 0, total_w = 0;
-        if (t->game_over()) {
-            // 't' is a final state, just update the scores
-            if (t->who_win() == my_player) {
-                total_g = playout_num;
-                total_w = playout_num;
-            } else if (t->who_win() == 0) {
-                total_g = playout_num;
-                total_w = playout_num / 2.0;
-            } else {
-                total_g = playout_num;
-                total_w = 0;
-            }
-        } else {
-            // Run simulations 'playout_num' times
-            for (int j = 0; j < playout_num; ++j) {
-                Position *tt = new Position(*t);
-
-                // Run a random simulation
-                while (!tt->game_over()) {
-                    if (!tt->is_pass()) {
-                        int x = 0, y = 0; // TODO ------------------------------------------------ RANDOM
-                        do {
-                            x++;
-                            if (x == 9) {
-                                x = 0;
-                                y++;
+                            if (ucb < tmp_ucb) {
+                                ucb = tmp_ucb;
+                                tmp_pos = &next_pos[j];
                             }
-                            y %= 9;
-                        } while (tt->make_move(x, y) == -1);
+                        }
                     } else {
-                        tt->pass_move();
+                        // For the other player, select the child that minimizes the score
+                        double ucb = 10000000000000.0;
+                        for (int j = 0; j < next_pos.size(); ++j) {
+                            value *vv = localTree[next_pos[j]];
+                            double pj = vv->total_win;
+                            double nj = vv->total_game;
+                            double tmp_ucb = pj / nj - sqrt(z * log(T) / nj);
+
+                            if (ucb > tmp_ucb) {
+                                ucb = tmp_ucb;
+                                tmp_pos = &next_pos[j];
+                            }
+                        }
                     }
-                }
 
-                // Update the scores based on the result of the last game
-                if (tt->who_win() == my_player) {
-                    total_g += 1;
-                    total_w += 1;
-                } else if (tt->who_win() == 0) {
-                    total_g += 1;
-                    total_w += 0.5;
-                } else {
-                    total_g += 1;
-                    total_w += 0;
+                    // Add to linked-list, the parent value
+                    localTree[*tmp_pos]->last_pos_value = v;
+                    if (t != s_local)
+                        delete t;
+
+                    // Go to next state
+                    t = new Position(*tmp_pos);
                 }
-                delete tt;
             }
-        }
 
-        // Back propagate the result (up to 500 levels of the tree)
-        value *v_ = tree[*t];
-        v_->total_game += total_g;
-        v_->total_win += total_w;
-        int loop_num = 0;
+            // Playout policy: Run some random games and obtain some scores
+            double total_g = 0, total_w = 0;
+            if (t->game_over()) {
+                // 't' is a final state, just update the scores
+                if (t->who_win() == my_player) {
+                    total_g = playout_num;
+                    total_w = playout_num;
+                } else if (t->who_win() == 0) {
+                    total_g = playout_num;
+                    total_w = playout_num / 2.0;
+                } else {
+                    total_g = playout_num;
+                    total_w = 0;
+                }
+            } else {
+                // Run simulations 'playout_num' times
+                for (int j = 0; j < playout_num; ++j) {
+                    Position *tt = new Position(*t);
+                    // Run a random simulation
+                    int steps = 0;
 
-        while (v_ != root_v && loop_num++ < 500) {
-            v_ = v_->last_pos_value;
+                    while (!tt->game_over()) {
+                        steps++;
+
+                        if (!tt->is_pass()) {
+                            int x = 0, y = 0;
+                            do {
+                                x = rand() % 9;
+                                y = rand() % 9;
+                            } while (tt->make_move(x, y) == -1);
+                            // do {
+                            //     x++;
+                            //     if (x == 9) {
+                            //         x = 0;
+                            //         y++;
+                            //     }
+                            //     y %= 9;
+                            // } while (tt->make_move(x, y) == -1);
+                        } else {
+                            tt->pass_move();
+                        }
+
+                        if (steps == 5000) {
+                            cout << "STUKED!" << endl;
+                            tt->print();
+                            break;
+                        }
+                    }
+
+                    // Update the scores based on the result of the last game
+                    if (tt->who_win() == my_player) {
+                        total_g += 1;
+                        total_w += 1;
+                    } else if (tt->who_win() == 0) {
+                        total_g += 1;
+                        total_w += 0.5;
+                    } else {
+                        total_g += 1;
+                        total_w += 0;
+                    }
+                    delete tt;
+                }
+            }
+ 
+            // Back propagate the result (up to 500 levels of the tree)
+            value *v_ = localTree[*t];
             v_->total_game += total_g;
             v_->total_win += total_w;
+            int loop_num = 0;
+
+            while (v_ != root_v && loop_num++ < 500) {
+                v_ = v_->last_pos_value;
+                v_->total_game += total_g;
+                v_->total_win += total_w;
+            }
+        }
+        localTrees[threadIndex].clear();
+        localTrees[threadIndex] = localTree;
+    }
+
+    // Merge local trees to global trees
+    for (int i = 0; i < thread_num; ++i) {
+        for (auto node = localTrees[i].begin(); node != localTrees[i].end(); node++) {
+            if (tree.find(node->first) == tree.end() 
+                    && node->second->total_game != 0) {
+                tree[node->first] = node->second;
+            } else if (node->second->total_game != 0) {
+                tree[node->first]->total_game += node->second->total_game;
+                tree[node->first]->total_win += node->second->total_win;
+            }
         }
     }
 
@@ -807,16 +845,20 @@ int main(int argc, char **argv) {
     double times1[2];
     double times2[2];
     int round_num = 0;
-    int playout_num, iteration;
+    int playout_num, iteration, thread_num;
 
-    if (argc != 3) {
-        cout << "usage: <iteration> <playout_num>" << endl;
+    if (argc != 4) {
+        cout << "usage: <iteration> <playout_num> <num_threads>" << endl;
         return 0;
     }
 
     iteration = atoi(argv[1]);
     playout_num = atoi(argv[2]);
+    thread_num = atoi(argv[3]);
+    omp_set_num_threads(thread_num);
 
+    localTrees = new unordered_map<Position, value *>[thread_num];
+    
 #if LOG
     timing(times1, times1 + 1);
 #endif
@@ -827,7 +869,7 @@ int main(int argc, char **argv) {
              << "========= Round: " << round_num << " ==========" << endl;
         cout << "========== Player 1 ==========" << endl;
 #endif
-        s = mcts_play(s, iteration, playout_num, trees[0]);
+        s = mcts_play(s, iteration, playout_num, trees[0], thread_num);
 
 #if VISUAL
         s->print();
@@ -839,19 +881,21 @@ int main(int argc, char **argv) {
 #if VISUAL
         cout << "========== Player 2 ==========" << endl;
 #endif
-        s = mcts_play(s, iteration, playout_num, trees[1]);
-        // random_play(s);
+        s = mcts_play(s, iteration, playout_num, trees[1], thread_num);
 
 #if VISUAL
         s->print();
 #endif
     }
-
+ 
 #if LOG
     timing(times2, times2 + 1);
     cout << "Average time of one step: " << (times2[0] - times1[0]) / round_num << "s." << endl;
 #endif
 
+    // Release memory
+    delete[] localTrees;
     delete s;
+
     return 0;
 }

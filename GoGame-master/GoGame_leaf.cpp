@@ -11,7 +11,7 @@
 #include <vector>
 using namespace std;
 
-#define LOG 1
+#define LOG 1 
 
 void timing(double *wcTime, double *cpuTime) {
     struct timeval tp;
@@ -619,7 +619,7 @@ Position *mcts_play(Position *s, int iters, int playout_num) {
 				reduction(+: total_g) reduction(+ : total_w)
             for (j = 0; j < playout_num; ++j) {
                 Position *tt = new Position(*t);
-		
+
                 while (!tt->game_over()) {
                     if (!tt->is_pass()) {
                         int x, y;
@@ -704,11 +704,13 @@ int main(int argc, char **argv) {
         if (LOG)
             cout << "----- round: " << round_num << " ------" << endl;
         s = mcts_play(s, iteration, playout_num);
+        // random_play(s);
         // s->print();
         round_num += 1;
         if (s->game_over())
             break;
         random_play(s);
+        // s = mcts_play(s, iteration, playout_num);
         s->print();
     }
     timing(times2, times2 + 1);
