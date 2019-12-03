@@ -865,7 +865,7 @@ Position *mcts_play(Position *s, int iters, int playout_num, unordered_map<Posit
 
             int len = serial_str.size();
 
-            MPI_Send(&len, MPI_INT, threadIndex, 0, MPI_COMM_WORLD);
+            MPI_Send(&len, 1, MPI_INT, threadIndex, 0, MPI_COMM_WORLD);
             MPI_Send((void *)serial_str.data(), len, MPI_BYTE, threadIndex, 1, MPI_COMM_WORLD);
         }
     }
@@ -875,13 +875,13 @@ Position *mcts_play(Position *s, int iters, int playout_num, unordered_map<Posit
             continue;
 
         int len;
-        MPI_Recv(&len, MPI_INT, tid, 0, MPI_COMM_WORLD, MPI_STATUS_IGNORE);
+        MPI_Recv(&len, 1, MPI_INT, tid, 0, MPI_COMM_WORLD, MPI_STATUS_IGNORE);
         
         char serial_str[len + 1];
         MPI_Recv(serial_str, len, MPI_BYTE, tid, 1, MPI_COMM_WORLD, MPI_STATUS_IGNORE);
         serial_str[len] = '\0';
 
-        boost::iostreams::basic_array_source<char> device(serial_str.data(), len);
+        boost::iostreams::basic_array_source<char> device(serial_str, len);
         boost::iostreams::stream<boost::iostreams::basic_array_source<char> > s1(device);
         boost::archive::binary_iarchive recv_ar(s1);
 
