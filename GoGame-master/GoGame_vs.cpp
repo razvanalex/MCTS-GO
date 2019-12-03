@@ -1116,6 +1116,7 @@ int main(int argc, char **argv) {
     srand(time(0));
     omp_set_num_threads(THREAD_NUM);
 
+    Position *s = new Position();
     double times1[2];
     double times2[2];
     int round_num = 0, win1 = 0, win2 = 0;

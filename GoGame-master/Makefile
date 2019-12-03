@@ -12,7 +12,7 @@ GoGame_root_app: GoGame_root_app.cpp
 	$(CC) GoGame_root_app.cpp -g -O0 -fopenmp -std=c++11 -o GoGame_root_app
 
 GoGame_root_mpi: GoGame_root_mpi.cpp
-	mpicc GoGame_root_mpi.cpp -g -O0 -std=c++11 -o GoGame_root_mpi -lboost_serialization
+	mpic++ GoGame_root_mpi.cpp -O0 -std=c++11 -o GoGame_root_mpi -lboost_serialization
 
 GoGame_vs: GoGame_vs.cpp
 	$(CC) GoGame_vs.cpp -g -O3 -fopenmp -std=c++11 -o GoGame_vs

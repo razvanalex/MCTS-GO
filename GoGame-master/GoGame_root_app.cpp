@@ -12,8 +12,17 @@
 
 using namespace std;
 
-#define VISUAL 1    // For visualizing the game
-#define LOG 0       // For printing the average time
+#define VISUAL              1   // For visualizing the game
+#define LOG                 0   // For printing the average time
+
+#define RANDOM_PLAY         1   // 1 = Random simulation
+
+#define USE_TIME_ROUND      1   // 1 = Use time; 0 = Use iterations
+#define TIME_PER_ROUND      0.5   // In seconds
+
+#define USE_TIME_SIM        1   // 1 = Use time; 0 = Use iterations
+#define TIME_PER_SIM        0.05 // In seconds
+
 
 /**
  * Measures the time.
@@ -613,7 +622,7 @@ Position *mcts_play(Position *s, int iters, int playout_num, unordered_map<Posit
         s->pass_move();
         return s;
     }
-    
+
     #pragma omp parallel
     {
         int threadIndex = omp_get_thread_num();
@@ -645,8 +654,14 @@ Position *mcts_play(Position *s, int iters, int playout_num, unordered_map<Posit
         Position *t;
 
         // Run the game 'iters' times
+#if USE_TIME_ROUND
+        double time1_round, time2_round, time_cpu;
+        timing(&time1_round, &time_cpu);
+        do {
+#else
         #pragma omp for schedule(dynamic)
         for (int i = 0; i < iters; ++i) {
+#endif
             t = s_local;
 
             // Selection
@@ -670,7 +685,7 @@ Position *mcts_play(Position *s, int iters, int playout_num, unordered_map<Posit
 
                 // If all_in then tree policy else expand (create a new node) and break
                 if (all_in == false) {
-                    // Explore new state
+                    // Explore new stateUSE_TIME
                     localTree[next_pos[index]] = new value(localTree[*t], 0.0, 0.0);
                     t = new Position(next_pos[index]);
                     break;
@@ -740,7 +755,13 @@ Position *mcts_play(Position *s, int iters, int playout_num, unordered_map<Posit
                 }
             } else {
                 // Run simulations 'playout_num' times
+#if USE_TIME_SIM
+                double time1_sim, time2_sim, time_cpu;
+                timing(&time1_sim, &time_cpu);
+                do {
+#else
                 for (int j = 0; j < playout_num; ++j) {
+#endif
                     Position *tt = new Position(*t);
                     // Run a random simulation
                     int steps = 0;
@@ -750,18 +771,21 @@ Position *mcts_play(Position *s, int iters, int playout_num, unordered_map<Posit
 
                         if (!tt->is_pass()) {
                             int x = 0, y = 0;
+#if RANDOM_PLAY
                             do {
                                 x = rand() % 9;
                                 y = rand() % 9;
                             } while (tt->make_move(x, y) == -1);
-                            // do {
-                            //     x++;
-                            //     if (x == 9) {
-                            //         x = 0;
-                            //         y++;
-                            //     }
-                            //     y %= 9;
-                            // } while (tt->make_move(x, y) == -1);
+#else
+                            do {
+                                x++;
+                                if (x == 9) {
+                                    x = 0;
+                                    y++;
+                                }
+                                y %= 9;
+                            } while (tt->make_move(x, y) == -1);
+#endif
                         } else {
                             tt->pass_move();
                         }
@@ -785,7 +809,12 @@ Position *mcts_play(Position *s, int iters, int playout_num, unordered_map<Posit
                         total_w += 0;
                     }
                     delete tt;
+#if USE_TIME_SIM
+                    timing(&time2_sim, &time_cpu);
+                } while (time2_sim - time1_sim < TIME_PER_SIM);
+#else
                 }
+#endif
             }
  
             // Back propagate the result (up to 500 levels of the tree)
@@ -799,7 +828,14 @@ Position *mcts_play(Position *s, int iters, int playout_num, unordered_map<Posit
                 v_->total_game += total_g;
                 v_->total_win += total_w;
             }
+
+#if USE_TIME_ROUND
+            timing(&time2_round, &time_cpu);
+        } while (time2_round - time1_round < TIME_PER_ROUND);
+#else
         }
+#endif
+
         localTrees[threadIndex].clear();
         localTrees[threadIndex] = localTree;
     }
