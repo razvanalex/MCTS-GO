@@ -843,8 +843,7 @@ Position *mcts_play(Position *s, int iters, int playout_num, unordered_map<Posit
     // Merge local trees to global trees
     for (int i = 0; i < thread_num; ++i) {
         for (auto node = localTrees[i].begin(); node != localTrees[i].end(); node++) {
-            if (tree.find(node->first) == tree.end() 
-                    && node->second->total_game != 0) {
+            if (tree.find(node->first) == tree.end() && node->second->total_game != 0) {
                 tree[node->first] = node->second;
             } else if (node->second->total_game != 0) {
                 tree[node->first]->total_game += node->second->total_game;

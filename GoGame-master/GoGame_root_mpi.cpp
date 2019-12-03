@@ -2,34 +2,36 @@
 #include <cstdlib>
 #include <ctime>
 #include <iostream>
+#include <mpi.h>
 #include <string>
 #include <sys/resource.h>
 #include <sys/time.h>
 #include <sys/types.h>
 #include <unordered_map>
 #include <vector>
-#include <mpi.h>
-#include <fstream>
 
 #include <boost/archive/binary_iarchive.hpp>
 #include <boost/archive/binary_oarchive.hpp>
-#include <boost/iostreams/stream_buffer.hpp>
-#include <boost/iostreams/stream.hpp>
-#include <boost/serialization/unordered_map.hpp>
-
 #include <boost/iostreams/device/back_inserter.hpp>
-
-#include <boost/serialization/vector.hpp>
-#include <boost/serialization/string.hpp>
+#include <boost/iostreams/stream.hpp>
+#include <boost/iostreams/stream_buffer.hpp>
 #include <boost/serialization/list.hpp>
-
+#include <boost/serialization/string.hpp>
+#include <boost/serialization/unordered_map.hpp>
+#include <boost/serialization/vector.hpp>
 
 using namespace std;
 
-ofstream f[4];
+#define VISUAL 1 // For visualizing the game
+#define LOG 0    // For printing the average time
 
-#define VISUAL 1    // For visualizing the game
-#define LOG 0       // For printing the average time
+#define RANDOM_PLAY 1 // 1 = Random simulation
+
+#define USE_TIME_ROUND 1   // 1 = Use time; 0 = Use iterations
+#define TIME_PER_ROUND 0.5 // In seconds
+
+#define USE_TIME_SIM 1    // 1 = Use time; 0 = Use iterations
+#define TIME_PER_SIM 0.05 // In seconds
 
 /**
  * Measures the time.
@@ -53,22 +55,21 @@ void timing(double *wcTime, double *cpuTime) {
 class Position {
     friend class boost::serialization::access;
 
-    template<class Archive>
-    void serialize(Archive & ar, const unsigned int version)
-    {
+    template <class Archive>
+    void serialize(Archive &ar, const unsigned int version) {
 
-        ar & board;
-        ar & is_visit;
+        ar &board;
+        ar &is_visit;
 
-        ar & player;
-        
-        ar & ko_row;
-        ar & ko_col;
-        ar & ko_turn;
+        ar &player;
 
-        ar & win_player;
-        ar & player1_pass;
-        ar & player2_pass;
+        ar &ko_row;
+        ar &ko_col;
+        ar &ko_turn;
+
+        ar &win_player;
+        ar &player1_pass;
+        ar &player2_pass;
     }
 
 public:
@@ -146,7 +147,7 @@ public:
             is_visit.push_back(tmp);
         }
     }
-    
+
     /**
      * Check if a move is valid.
      * @param row The row where to check if it is a valid move.
@@ -474,7 +475,7 @@ private:
         // Mark (row, col) as visited
         is_visit[row][col] = true;
 
-        // If the (row, col) is of player_, continue searching on neighbors 
+        // If the (row, col) is of player_, continue searching on neighbors
         if (board[row][col] == player_) {
             dfs(row + 1, col, player_, res);
             dfs(row - 1, col, player_, res);
@@ -545,13 +546,12 @@ private:
  */
 class value {
 
-    friend class  boost::serialization::access;
-    template<class Archive>
-    void serialize(Archive & ar, const unsigned int version)
-    {
-        ar & last_pos_value;
-        ar & total_game;
-        ar & total_win;
+    friend class boost::serialization::access;
+    template <class Archive>
+    void serialize(Archive &ar, const unsigned int version) {
+        ar &last_pos_value;
+        ar &total_game;
+        ar &total_win;
     }
 
 public:
@@ -559,7 +559,7 @@ public:
     double total_game;
     double total_win;
 
-    value(){}
+    value() {}
 
     value(value *p_v, double g, double w) {
         last_pos_value = p_v;
@@ -603,12 +603,12 @@ void get_next_pos(Position *s, vector<Position> &next_pos) {
 }
 
 namespace std {
-    /* Overwrite the hash operation */
-	template <> struct hash<Position> {
-		size_t operator()(const Position obj) const {
-			return hash<string>()(obj.to_string());
-		}
-	};
+/* Overwrite the hash operation */
+template <> struct hash<Position> {
+    size_t operator()(const Position obj) const {
+        return hash<string>()(obj.to_string());
+    }
+};
 }
 
 /**
@@ -646,8 +646,33 @@ void manual_play(Position *s) {
 unordered_map<Position, value *> trees[2];
 unordered_map<Position, value *> *localTrees;
 
+/**
+ * This is a generic function that broadcasts the data of a class that is 
+ * serializable.
+ */
+template <class Type>
+void broadcast(Type &data, int root) {
+    string data_str;
+    boost::iostreams::back_insert_device<std::string> data_inserter(data_str);
+    boost::iostreams::stream<boost::iostreams::back_insert_device<std::string>> data_stream(data_inserter);
+    boost::archive::binary_oarchive send_data(data_stream);
 
-int game_over = 0;
+    send_data << data;
+    data_stream.flush();
+
+    int data_len = data_str.size();
+    MPI_Bcast(&data_len, 1, MPI_INT, root, MPI_COMM_WORLD);
+
+    char bcast_data[data_len];
+    memcpy(bcast_data, data_str.c_str(), data_len);
+    MPI_Bcast((void *)bcast_data, data_len, MPI_BYTE, root, MPI_COMM_WORLD);
+
+    boost::iostreams::basic_array_source<char> device_data(bcast_data, data_len);
+    boost::iostreams::stream<boost::iostreams::basic_array_source<char>> data_unpacker(device_data);
+    boost::archive::binary_iarchive recv_data(data_unpacker);
+
+    recv_data >> data;
+}
 
 /**
  * This is MCTS play.
@@ -659,41 +684,11 @@ int game_over = 0;
 Position *mcts_play(Position *s, int iters, int playout_num, unordered_map<Position, value *> tree, int threadIndex, int thread_num) {
     int my_player = s->player;
 
-    if (threadIndex != 0) {
-        MPI_Bcast(&game_over, 0, MPI_INT, 0, MPI_COMM_WORLD);
-        f[threadIndex] << threadIndex <<  " " << game_over << ": =======Broadcast==========" << endl;
-        // if (game_over) {
-        //     return NULL;
-        // }
-
-    } else {
-        cout << game_over << endl;
-        // The player cannot put a stone. Pass move!
-        if (game_over || s->is_pass()) {
-            s->pass_move();
-
-            game_over = 1;
-            
-            MPI_Bcast(&game_over, 0, MPI_INT, 0, MPI_COMM_WORLD);
-           
-            f[threadIndex] << threadIndex <<  " " << game_over << ": =======Broadcast==========" << endl;
-
-            cout << game_over << endl;
-        } else {
-
-            MPI_Bcast(&game_over, 0, MPI_INT, 0, MPI_COMM_WORLD);
-            cout << game_over << endl;
-        }
-        f[threadIndex] << threadIndex << ": =======HH==========" << endl;
-    }
-    
-    MPI_Barrier(MPI_COMM_WORLD);
-    game_over = 1447;
-    MPI_Bcast(&game_over, 0, MPI_INT, 0, MPI_COMM_WORLD);
-    f[threadIndex] << game_over << ": ======= GAME OVER ==========" << endl;
-
-    if (game_over)
+    // The player cannot put a stone. Pass move!
+    if (s->is_pass()) {
+        s->pass_move();
         return s;
+    }
 
     unordered_map<Position, value *> localTree = tree;
     Position *s_local = new Position(*s);
@@ -723,7 +718,13 @@ Position *mcts_play(Position *s, int iters, int playout_num, unordered_map<Posit
     Position *t;
 
     // Run the game 'iters' times
+#if USE_TIME_ROUND
+    double time1_round, time2_round, time_cpu;
+    timing(&time1_round, &time_cpu);
+    do {
+#else
     for (int i = 0; i < iters; ++i) {
+#endif
         t = s_local;
 
         // Selection
@@ -817,7 +818,13 @@ Position *mcts_play(Position *s, int iters, int playout_num, unordered_map<Posit
             }
         } else {
             // Run simulations 'playout_num' times
+#if USE_TIME_SIM
+            double time1_sim, time2_sim, time_cpu;
+            timing(&time1_sim, &time_cpu);
+            do {
+#else
             for (int j = 0; j < playout_num; ++j) {
+#endif
                 Position *tt = new Position(*t);
                 // Run a random simulation
                 int steps = 0;
@@ -827,18 +834,21 @@ Position *mcts_play(Position *s, int iters, int playout_num, unordered_map<Posit
 
                     if (!tt->is_pass()) {
                         int x = 0, y = 0;
+#if RANDOM_PLAY
                         do {
                             x = rand() % 9;
                             y = rand() % 9;
                         } while (tt->make_move(x, y) == -1);
-                        // do {
-                        //     x++;
-                        //     if (x == 9) {
-                        //         x = 0;
-                        //         y++;
-                        //     }
-                        //     y %= 9;
-                        // } while (tt->make_move(x, y) == -1);
+#else
+                        do {
+                            x++;
+                            if (x == 9) {
+                                x = 0;
+                                y++;
+                            }
+                            y %= 9;
+                        } while (tt->make_move(x, y) == -1);
+#endif
                     } else {
                         tt->pass_move();
                     }
@@ -862,8 +872,13 @@ Position *mcts_play(Position *s, int iters, int playout_num, unordered_map<Posit
                     total_w += 0;
                 }
                 delete tt;
+#if USE_TIME_SIM
+                    timing(&time2_sim, &time_cpu);
+                } while (time2_sim - time1_sim < TIME_PER_SIM);
+#else
+                }
+#endif
             }
-        }
 
         // Back propagate the result (up to 500 levels of the tree)
         value *v_ = localTree[*t];
@@ -876,13 +891,18 @@ Position *mcts_play(Position *s, int iters, int playout_num, unordered_map<Posit
             v_->total_game += total_g;
             v_->total_win += total_w;
         }
+
+ #if USE_TIME_ROUND
+        timing(&time2_round, &time_cpu);
+    } while (time2_round - time1_round < TIME_PER_ROUND);
+#else
     }
-    f[threadIndex] << "1" << endl;
+#endif
 
     if (threadIndex != 0) {
         string serial_str;
         boost::iostreams::back_insert_device<std::string> inserter(serial_str);
-        boost::iostreams::stream<boost::iostreams::back_insert_device<std::string> > s(inserter);
+        boost::iostreams::stream<boost::iostreams::back_insert_device<std::string>> s(inserter);
         boost::archive::binary_oarchive send_ar(s);
 
         send_ar << localTree;
@@ -892,29 +912,29 @@ Position *mcts_play(Position *s, int iters, int playout_num, unordered_map<Posit
 
         MPI_Send(&len, 1, MPI_INT, 0, 0, MPI_COMM_WORLD);
         MPI_Send((void *)serial_str.data(), len, MPI_BYTE, 0, 1, MPI_COMM_WORLD);
-    
+
     } else {
         localTrees[threadIndex] = localTree;
     }
 
     if (threadIndex == 0) {
         for (int tid = 0; tid < thread_num; tid++) {
-            if  (tid == 0)
+            if (tid == 0)
                 continue;
 
             int len;
             MPI_Recv(&len, 1, MPI_INT, tid, 0, MPI_COMM_WORLD, MPI_STATUS_IGNORE);
-            
+
             char serial_str[len + 1];
             MPI_Recv(serial_str, len, MPI_BYTE, tid, 1, MPI_COMM_WORLD, MPI_STATUS_IGNORE);
             serial_str[len] = '\0';
 
             boost::iostreams::basic_array_source<char> device(serial_str, len);
-            boost::iostreams::stream<boost::iostreams::basic_array_source<char> > s1(device);
+            boost::iostreams::stream<boost::iostreams::basic_array_source<char>> s1(device);
             boost::archive::binary_iarchive recv_ar(s1);
 
             localTrees[tid].clear();
-            recv_ar >> localTrees[tid];     
+            recv_ar >> localTrees[tid];
         }
 
         // Merge local trees to global trees
@@ -930,35 +950,8 @@ Position *mcts_play(Position *s, int iters, int playout_num, unordered_map<Posit
         }
     }
 
-    f[threadIndex] << "2" << endl;
-
-    // TODO: Broadcast the trees
-    string tree_str;
-    boost::iostreams::back_insert_device<std::string> tree_inserter(tree_str);
-    boost::iostreams::stream<boost::iostreams::back_insert_device<std::string> > tree_stream(tree_inserter);
-    boost::archive::binary_oarchive send_tree(tree_stream);
-
-    send_tree << tree;
-    tree_stream.flush();
-
-    int tree_len = tree_str.size();
-
-
-    MPI_Bcast(&tree_len, 1, MPI_INT, 0, MPI_COMM_WORLD);
-    f[threadIndex] << "3" << endl;
-
-    char tree_data[tree_len];
-    memcpy(tree_data, tree_str.c_str(), tree_len);
-
-    MPI_Bcast((void *)tree_data, tree_len, MPI_BYTE, 0, MPI_COMM_WORLD);
-    f[threadIndex] << "4" << endl;
-
-    boost::iostreams::basic_array_source<char> device_tree(tree_data, tree_len);
-    boost::iostreams::stream<boost::iostreams::basic_array_source<char> > tree_unpacker(device_tree);
-    boost::archive::binary_iarchive recv_tree(tree_unpacker);
-
-    recv_tree >> tree;
-
+    // Broadcast the trees
+    broadcast(tree, 0);
 
     if (threadIndex == 0) {
         // Choose the best move
@@ -979,21 +972,15 @@ Position *mcts_play(Position *s, int iters, int playout_num, unordered_map<Posit
 
         delete s;
         s = new Position(next_pos[index]);
-        return s;
     }
-    
-    return NULL;
+
+    broadcast(s, 0);
+    return s;
 }
 
 int main(int argc, char **argv) {
     srand(time(0));
-    char name[30];
-    for (int i = 0; i < sizeof(f) / sizeof(f[0]); i++) {
-        sprintf(name, "out_%d.txt", i);
-        f[i].open(name);
-    }
 
-    Position *s_tmp;
     Position *s = new Position();
     double times1[2];
     double times2[2];
@@ -1011,9 +998,9 @@ int main(int argc, char **argv) {
     /* Initialize MPI */
     MPI_Init(NULL, NULL);
     MPI_Comm_size(MPI_COMM_WORLD, &thread_num);
-    
+
     localTrees = new unordered_map<Position, value *>[thread_num];
-    
+
     int threadIndex = 0;
     MPI_Comm_rank(MPI_COMM_WORLD, &threadIndex);
 
@@ -1026,63 +1013,47 @@ int main(int argc, char **argv) {
 #if VISUAL
         if (threadIndex == 0) {
             cout << endl
-                << "========= Round: " << round_num << " ==========" << endl;
+                 << "========= Round: " << round_num << " ==========" << endl;
             cout << "========== Player 1 ==========" << endl;
         }
 #endif
-        f[threadIndex] << threadIndex << ": ============IN=====" << endl;
-        game_over = 0;
-        MPI_Barrier(MPI_COMM_WORLD);
-        s_tmp = mcts_play(s, iteration, playout_num, trees[0], threadIndex, thread_num);
-        if (threadIndex == 0)
-            s = s_tmp;
 
-    if (threadIndex == 0) {
+        // MPI_Barrier(MPI_COMM_WORLD);
+        s = mcts_play(s, iteration, playout_num, trees[0], threadIndex, thread_num);
+
 #if VISUAL
-        s->print();
+        if (threadIndex == 0)
+            s->print();
 #endif
         round_num += 1;
         if (s->game_over())
             break;
-    
+
 #if VISUAL
-        cout << "========== Player 2 ==========" << endl;
-#endif
-    }
-        game_over = 0;
-
-        MPI_Barrier(MPI_COMM_WORLD);
-        s_tmp = mcts_play(s, iteration, playout_num, trees[1], threadIndex, thread_num);
         if (threadIndex == 0)
-            s = s_tmp;
+            cout << "========== Player 2 ==========" << endl;
+#endif
 
-        f[threadIndex] << threadIndex << ": =================" << endl;
+        // MPI_Barrier(MPI_COMM_WORLD);
+        s = mcts_play(s, iteration, playout_num, trees[1], threadIndex, thread_num);
+
 #if VISUAL
         if (threadIndex == 0)
             s->print();
 #endif
     }
-    
-    cout << "final" << endl;
- 
+
 #if LOG
     if (threadIndex == 0) {
         timing(times2, times2 + 1);
         cout << "Average time of one step: " << (times2[0] - times1[0]) / round_num << "s." << endl;
     }
 #endif
-
-    // if (threadIndex == 0) {
-
-    // }
-
     MPI_Finalize();
 
     // Release memory
     delete[] localTrees;
     delete s;
-    for (int i = 0; i < sizeof(f) / sizeof(f[0]); i++)
-        f[i].close();
-    
+
     return 0;
 }
