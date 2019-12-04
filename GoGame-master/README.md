@@ -22,14 +22,22 @@ There are 4 implementations of the MCTS:
 * Root parallelization using OMP
 * Use compiling directives to enable/disable prints
 
+* Mpi implementation: classes made serializable for broadcasting data among the processes (using boost library), thread 0 is the master and the other ones are slaves.
+* Done benchmarking for openmp implementation and the results are realy good (on 8 threads, the average is between 7-8 at the same time, and also there are no deadlocks or race conditions)
+* Fixed load balance, by using time limit instead of a number of iterations (for both openmp and mpi)
+
+
 **Note**: For compiling using icc, change from -fopenmp to -openmp in Makefile (for running on cluster)
+
 **UPDATED:** Makefile uses icc. To use gcc/g++ change CC and for omp, change the flag from -qopenmp (for intel compiler)
 to -fopenmp
 
+**UPDATED v2:** Makefile uses gcc, again. To use icc change CC and for omp, change the flag from -fopenmp to -qopenmp
+
 
 # TODO:
-- pana la finalul saptamanii trebuie sa fie gata openMP + profiling 
-- pe 14 dec trebuie sa fie gata proiectul
+  - pana la finalul saptamanii trebuie sa fie gata openMP + profiling [DONE]
+- pe 14 dec trebuie sa fie gata proiectul 
 - pe saptamana urmatoare testare si fine tuning
 - data viitoare o alta paralelizare
 - implementare hibrida = bonus
