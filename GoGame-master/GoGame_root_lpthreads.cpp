@@ -856,9 +856,13 @@ enum status { RUNNING, FINISHED } status;
 
 
 int submit_job(struct job *params) {
+    pthread_mutex_lock(&job_mutex);
+
     global_count = params->thread_num;
     global_params = params;
     pthread_cond_broadcast(&wait_job);
+
+    pthread_mutex_unlock(&job_mutex);
 
     return 0;
 }
@@ -874,15 +878,15 @@ struct job *get_job(int threadId) {
     memcpy(new_job, global_params, sizeof(struct job));
     new_job->thread_param.threadId = threadId;
 
+    global_count--;
     return new_job;
 }
 
 void finish_jobs() {
-    pthread_barrier_wait(&barrier);
-    pthread_mutex_lock(&status_mutex);
     status = FINISHED;
-    pthread_cond_broadcast(&wait_job);
+    pthread_mutex_lock(&status_mutex);
     pthread_mutex_unlock(&status_mutex);
+    pthread_cond_broadcast(&wait_job);
 }
 
 void *run_job(void *args) {
@@ -892,7 +896,7 @@ void *run_job(void *args) {
 
     // Wait for all jobs to finish
     pthread_barrier_wait(&barrier);
-    
+        
     while (status == RUNNING) {
         my_job = NULL;
 
@@ -915,7 +919,6 @@ void *run_job(void *args) {
 
         // Wait for all jobs to finish
         pthread_barrier_wait(&barrier);
-
     }
 
     return NULL;
@@ -951,7 +954,10 @@ Position *mcts_play(Position *s, int iters, int playout_num, unordered_map<Posit
     // Submit and run
     submit_job(&scheduled_job);
 
+    pthread_mutex_lock(&job_mutex);
     struct job *my_job = get_job(0);
+    pthread_mutex_unlock(&job_mutex);
+
     if (!my_job) {
         fprintf(stderr, "ERROR! Master thread should get a job.\n");
         exit(-1);
@@ -992,6 +998,7 @@ Position *mcts_play(Position *s, int iters, int playout_num, unordered_map<Posit
         }
     }
 
+    delete s;
     s = new Position(next_pos[index]);
     return s;
 }
@@ -1023,23 +1030,22 @@ int main(int argc, char **argv) {
     // Create the thread pool
     pthread_t *threads = NULL;
     int *tid = NULL;
-
+    
     if (thread_num > 1) {
-        threads = (pthread_t *)malloc((thread_num - 1) * sizeof(pthread_t));
+        threads = (pthread_t *)malloc(thread_num * sizeof(pthread_t));
         tid = (int *)malloc((thread_num) * sizeof(int));
         status = RUNNING;
         for (int i = 1; i < thread_num; i++) {
             tid[i] = i;
             pthread_create(&threads[i], NULL, run_job, &tid[i]);
-        }    
+        }
     }
+
+    pthread_barrier_wait(&barrier);
 
 #if LOG
     timing(times1, times1 + 1);
 #endif
-
-    // Wait for all jobs to finish
-    pthread_barrier_wait(&barrier);
 
     while (!s->game_over()) {
 #if VISUAL
