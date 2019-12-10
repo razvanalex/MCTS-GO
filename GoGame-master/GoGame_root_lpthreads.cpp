@@ -867,20 +867,18 @@ struct job *get_job(int threadId) {
     if (global_count == 0)
         return NULL;
 
-    global_count--;
-    
     struct job *new_job = (struct job *)malloc(sizeof(struct job));
     if (!new_job)
         return NULL;
 
     memcpy(new_job, global_params, sizeof(struct job));
     new_job->thread_param.threadId = threadId;
-    // new_job->thread_param.s = new Position(*new_job->thread_param.s);
 
     return new_job;
 }
 
 void finish_jobs() {
+    pthread_barrier_wait(&barrier);
     pthread_mutex_lock(&status_mutex);
     status = FINISHED;
     pthread_cond_broadcast(&wait_job);
@@ -892,6 +890,9 @@ void *run_job(void *args) {
     struct job *my_job;
     struct parameters *_params;
 
+    // Wait for all jobs to finish
+    pthread_barrier_wait(&barrier);
+    
     while (status == RUNNING) {
         my_job = NULL;
 
@@ -914,6 +915,7 @@ void *run_job(void *args) {
 
         // Wait for all jobs to finish
         pthread_barrier_wait(&barrier);
+
     }
 
     return NULL;
@@ -990,7 +992,6 @@ Position *mcts_play(Position *s, int iters, int playout_num, unordered_map<Posit
         }
     }
 
-    delete s;
     s = new Position(next_pos[index]);
     return s;
 }
@@ -999,6 +1000,7 @@ int main(int argc, char **argv) {
     srand(time(0));
 
     Position *s = new Position();
+       
     double times1[2];
     double times2[2];
     int round_num = 0;
@@ -1029,12 +1031,15 @@ int main(int argc, char **argv) {
         for (int i = 1; i < thread_num; i++) {
             tid[i] = i;
             pthread_create(&threads[i], NULL, run_job, &tid[i]);
-        }
+        }    
     }
 
 #if LOG
     timing(times1, times1 + 1);
 #endif
+
+    // Wait for all jobs to finish
+    pthread_barrier_wait(&barrier);
 
     while (!s->game_over()) {
 #if VISUAL
