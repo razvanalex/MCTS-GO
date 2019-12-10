@@ -12,6 +12,8 @@ GoGame_root_omp: GoGame_root_omp.cpp
 GoGame_root_mpi: GoGame_root_mpi.cpp
 	mpic++ GoGame_root_mpi.cpp -O0 -std=c++11 -o GoGame_root_mpi -lboost_serialization
 
+GoGame_root_lpthreads: GoGame_root_lpthreads.cpp
+	$(CC) GoGame_root_lpthreads.cpp -O0 -g -std=c++11 -o GoGame_root_lpthreads -lpthread
 
 GoGame_root: GoGame_root.cpp
 	$(CC) GoGame_root.cpp -g -O3 -fopenmp -std=c++11 -o GoGame_root

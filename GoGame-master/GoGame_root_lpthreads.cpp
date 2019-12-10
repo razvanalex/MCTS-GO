@@ -9,6 +9,7 @@
 #include <unordered_map>
 #include <vector>
 #include <pthread.h>
+#include <string.h>
 
 using namespace std;
 
@@ -619,7 +620,7 @@ struct parameters {
 
 void* Explore_Arb(void *params) {
     struct parameters *p = (struct parameters *) params;
-    
+
     unordered_map<Position, value *> localTree = p->tree;
     Position *s_local = new Position(*(p->s));
 
@@ -837,6 +838,87 @@ void* Explore_Arb(void *params) {
     localTrees[threadIndex] = localTree;
 }
 
+
+struct job {
+    struct parameters thread_param;
+    void *(*job_func)(void *params);
+    int thread_num;
+};
+
+pthread_cond_t wait_job = PTHREAD_COND_INITIALIZER;
+pthread_mutex_t job_mutex = PTHREAD_MUTEX_INITIALIZER;
+pthread_mutex_t status_mutex = PTHREAD_MUTEX_INITIALIZER;
+pthread_barrier_t barrier;
+
+struct job *global_params;
+int global_count = 0;
+enum status { RUNNING, FINISHED } status;
+
+
+int submit_job(struct job *params) {
+    global_count = params->thread_num;
+    global_params = params;
+    pthread_cond_broadcast(&wait_job);
+
+    return 0;
+}
+
+struct job *get_job(int threadId) {
+    if (global_count == 0)
+        return NULL;
+
+    global_count--;
+    
+    struct job *new_job = (struct job *)malloc(sizeof(struct job));
+    if (!new_job)
+        return NULL;
+
+    memcpy(new_job, global_params, sizeof(struct job));
+    new_job->thread_param.threadId = threadId;
+    // new_job->thread_param.s = new Position(*new_job->thread_param.s);
+
+    return new_job;
+}
+
+void finish_jobs() {
+    pthread_mutex_lock(&status_mutex);
+    status = FINISHED;
+    pthread_cond_broadcast(&wait_job);
+    pthread_mutex_unlock(&status_mutex);
+}
+
+void *run_job(void *args) {
+    int threadId = *(int *)args;
+    struct job *my_job;
+    struct parameters *_params;
+
+    while (status == RUNNING) {
+        my_job = NULL;
+
+        // Get the job
+        pthread_mutex_lock(&job_mutex);
+        while ((my_job = get_job(threadId)) == NULL) {
+            pthread_cond_wait(&wait_job, &job_mutex);
+            if (status == FINISHED)
+                break;
+        }
+        pthread_mutex_unlock(&job_mutex);
+        
+        // Don't run the job is the status is FINISHED
+        if (status == FINISHED)
+            break;
+
+        // Run the job
+        my_job->job_func(&my_job->thread_param);
+        free(my_job);
+
+        // Wait for all jobs to finish
+        pthread_barrier_wait(&barrier);
+    }
+
+    return NULL;
+}
+
 /**
  * This is MCTS play.
  * @param s The current state.
@@ -853,23 +935,32 @@ Position *mcts_play(Position *s, int iters, int playout_num, unordered_map<Posit
         return s;
     }
 
-    pthread_t tids[thread_num];
+    struct job scheduled_job;
 
-    for (int i = 0; i < thread_num; i++) {
-        struct parameters thread_param;
-        
-        thread_param.tree = tree;
-        thread_param.s = s;
-        thread_param.player = my_player;
-        thread_param.playout_num = playout_num;
-        thread_param.threadId = i;
+    // Prepare the job
+    scheduled_job.job_func = &Explore_Arb;
+    scheduled_job.thread_num = thread_num;
+    scheduled_job.thread_param.tree = tree;
+    scheduled_job.thread_param.s = new Position(*s);
+    scheduled_job.thread_param.player = my_player;
+    scheduled_job.thread_param.playout_num = playout_num;
+    scheduled_job.thread_param.threadId = 0;
 
-        pthread_create(&tids[i], NULL, Explore_Arb, &thread_param);
+    // Submit and run
+    submit_job(&scheduled_job);
+
+    struct job *my_job = get_job(0);
+    if (!my_job) {
+        fprintf(stderr, "ERROR! Master thread should get a job.\n");
+        exit(-1);
     }
 
-    for (int i = 0; i < thread_num; i++) {
-        pthread_join(tids[i], NULL);
-    }
+    // Run the job
+    my_job->job_func(&my_job->thread_param);
+    free(my_job);
+
+    // Wait for all jobs to finish
+    pthread_barrier_wait(&barrier);
 
     // Merge local trees to global trees
     for (int i = 0; i < thread_num; ++i) {
@@ -924,6 +1015,23 @@ int main(int argc, char **argv) {
 
     localTrees = new unordered_map<Position, value *>[thread_num];
     
+    // Init the barrier
+    pthread_barrier_init(&barrier, NULL, thread_num);
+
+    // Create the thread pool
+    pthread_t *threads = NULL;
+    int *tid = NULL;
+
+    if (thread_num > 1) {
+        threads = (pthread_t *)malloc((thread_num - 1) * sizeof(pthread_t));
+        tid = (int *)malloc((thread_num) * sizeof(int));
+        status = RUNNING;
+        for (int i = 1; i < thread_num; i++) {
+            tid[i] = i;
+            pthread_create(&threads[i], NULL, run_job, &tid[i]);
+        }
+    }
+
 #if LOG
     timing(times1, times1 + 1);
 #endif
@@ -957,6 +1065,20 @@ int main(int argc, char **argv) {
     timing(times2, times2 + 1);
     cout << "Average time of one step: " << (times2[0] - times1[0]) / round_num << "s." << endl;
 #endif
+
+    // Join all threads created
+    if (thread_num > 1) {
+        finish_jobs();
+        for (int i = 1; i < thread_num; i++)
+            pthread_join(threads[i], NULL);
+        free(threads);
+        free(tid);
+    }
+
+    // Destroy mutexes, conditions, barriers etc
+    pthread_cond_destroy(&wait_job);
+    pthread_mutex_destroy(&job_mutex);
+    pthread_barrier_destroy(&barrier);
 
     // Release memory
     delete[] localTrees;
