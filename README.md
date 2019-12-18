@@ -147,59 +147,77 @@ Aceasta este cea mai buna abordare. Utilizarea procesoarelor este ideala, codul 
 
 ### Saptamana 4
 In aceasta saptamana am implementat varianta in MPI deoarece parea ca poate sa puna probleme mai mari decat PThreads. Activitati in cadrul acestei saptamani:
-  - Implementarea MPI bazata pe paralelizarea crearii de arbori ( posibilele mutari ) -- ROOT Paralelization.
-  - Ne folosim de mecanismul de comunicare pentru a trimite la ROOT ( threadId = 0 ) toti arborii creati de celelalte procese MPI. Pentru a putea face posibila aceasta trimitere am avut nevoie sa serializam informatia folosind biblioteca boost dedicata. Informatia odata primita este deserializata de catre ROOT si folosita pentru a intregii arborele principal.
+  - Implementarea MPI bazata pe paralelizarea crearii de arbori (posibilele mutari)
+  - Ne folosim de mecanismul de comunicare pentru a trimite la ROOT (threadId = 0) toti arborii creati de celelalte procese MPI. Pentru a putea face posibila aceasta trimitere am avut nevoie sa serializam informatia folosind biblioteca boost dedicata. Informatia odata primita este deserializata de catre ROOT si folosita pentru a intregii arborele principal.
   - A fost nevoie sa se faca broadcast cu arborii globali si, de asemenea, cu urmatoarea cea mai buna mutare aleasa. Astfel toate procesele vor avea noile date obtinute necesare pentru urmatoarea iteratie a jocului.
+
+Implementarea aceste variante nu a fost un task chiar trival datorita necesitatii de a serializa instantele de clase transmise celorlaltor procese. Pentru aceasta, am ales colectia de biblioteci **Boost** [4] care contine si o biblioteca de serializare. Pe cluster-ul facultatii nu este instalata, deci pentru rulare trebuie compilata folosind g++ 5.4.0 si de preferat, compiland doar biblioteca `serialization` (intrucat ocupa destul de mult spatiu pe disk). Instructiuni de instalare (orientativ):
+```bash
+$ wget https://dl.bintray.com/boostorg/release/1.72.0/source/boost_1_72_0.tar.gz
+[...] # some output
+$ tar -xvf boost_1_72_0.tar.gz
+[...] # some output
+$ module load compilers/gnu-5.4.0
+$ cd boost_1_72_0
+$ ./boostrap.sh --prefix=.
+[...] # some output
+$ ./b2 --with-serialization
+[...] # some output
+```
+**Nota:** Biblioteca a fost compilata pe fep, dar nu e publica (si va fi stearsa la finalul semestrului, dupa prezentare).
+
+**\[Actualizat saptamana 5\]:**  
+Folosind Intel Trace Analyzer, am determinat care este patternul de comunicatie si cat de eficient se realizeaza comunicatia. Rezultatele (pe masina locala) sunt urmatoarele:
+<img src="https://raw.githubusercontent.com/razvanalex/MCTS-GO/master/MPI%20profiling/mpi_general.png" />
+<img src="https://raw.githubusercontent.com/razvanalex/MCTS-GO/master/MPI%20profiling/mpi_comm_pattern.png" />
+<img src="https://raw.githubusercontent.com/razvanalex/MCTS-GO/master/MPI%20profiling/mpi_ops.png" />
+<img src="https://raw.githubusercontent.com/razvanalex/MCTS-GO/master/MPI%20profiling/mpi_comm_track.png" />
+<img src="https://raw.githubusercontent.com/razvanalex/MCTS-GO/master/MPI%20profiling/mpi_issues.png" />
+
+Se poate observa ca operatia de `broadcast` este cea mai costisitoare, dar si ca se asteapta ca toate procesele sa ajunga sa realizeze operatia (**late broadcast**). Acest lucru se datoareaza faptului ca procesele nu realizeaza in paralel exact aceleasi operatii, ci procesul ROOT face unele operatii suplimentare (de exemplu 'merge') si aceste operatii duc la desincronizarea intre procese. Operatia de `reduce` dureaza foarte putin, iar operatiile de `MPI_Send` si `MPI_Recv` nu au un impact foarte mare asupra timpului de executie total. Din figura a doua se observa ca primul proces comunica cu celelalte, iar intre restul proceselor nu exista comunicatie. In figura a patra, este aratat modalitatea de comunicarea intre procese, in timpul executiei, cand se transmit arborii calculati catre radacina si se determina urmatoarea mutare.
 
 
 ### Saptamana 5
-{{{
-- Status proiect:
-  - Implementare Pthreads si Hibrid (OpenMP + MPI)
+In aceasta saptamana am implementat varianta cu PThreads si Hybrid (OpenMP + MPI). Activitati in cadrul acestei saptamani:
+- Implementarea PThreads:
+  - Initial am decis crearea de thread-uri doar pentru paralelizarea alcatuirii noilor arbori de mutari. Astfel fiecare thread ar fi facut un arbore de mutari care apoi ar fi fost agregat in structura globala de thread-ul care le-a creat.
+  - Am decis ca sunt prea multe thread-uri create si nu este profitabil din punct de vedere al performantei deoarece se pierdea mult prea mult timp cu crearea acestora. Astfel am ales sa creem doar NUM_THREADS dat ca parametru programului care sa obtina job-uri dintr-un pool in care thread-ul principal adauga.
+  - Se vor sincroniza thread-urile care executa job-urile astfel:
+    - Cu o bariera - se asteapta incheierea tuturor job-urilor pentru a putea agrega rezultatele si alege mutarea cea mai favorabila (in thread-ul principa)
+    - Cu un mutex si un broadcast la variabila conditie - se asigura accessul la pool a unui singur thread la un moment de timp pentru obtinerea unui job
+- Implementarea Hibrida bazata pe paralelizarea crearii de arbori (posibilele mutari) astfel:
+  - Ne folosim de codul anterior realizat pentru MPI la care adaugam paralelizarea printr-o directiva OpenMP a generarii de arbori. Astfel fiecare proces va genera OMP_NUM_THREADS posibili arbori. Acestia se vor salva local fiecarui proces dupa care vor fi trimisi printr-un mesaj la procesul MPI ROOT (threadId = 0) care va agrega informatia primita intr-un singur arbore si caruia ii va face broadcast impreuna cu mutarea cea mai buna aleasa tuturor celorlalte procese.
 
-- Activitati:
-  - Implementarea Hibrida bazata pe paralelizarea crearii de arbori ( posibilele mutari ) -- ROOT Paralelization astfel:
-    - Ne folosim de codul anterior realizat pentru MPI la care adaugam paralelizarea printr-o directiva OpenMP a generarii de arbori. Astfel fiecare proces va genera OMP_NUM_THREADS posibili arbori. Acestia se vor salva local fiecarui proces dupa care vor fi trimisi printr-un mesaj la procesul MPI ROOT (threadId = 0) care va agrega informatia primita intr-un singur arbore si caruia ii va face broadcast impreuna cu mutarea cea mai buna aleasa tuturor celorlalte procese.
+Ulterior, am realizat o analiza de scalabilitate pentru a determina cat de bine scaleaza implementarea si care este eficienta. Astfel, analiza scalabilitate a fost realizata pe cluster-ul facultatii, pe masinile hp-sl si pe ibm-dp folosind sistemul de batch. Rezultatele pentru omp, pthreads, mpi, hybrid (omp + mpi) raportate la varianta seriala (pe un singur thread) sunt urmatoarele:
 
-  - Implementarea Pthreads:
-    - Initial am decis crearea de thread-uri doar pentru paralelizarea alcatuirii noilor arbori de mutari. Astfel fiecare thread ar fi facut un arbore de mutari care apoi ar fi fost agregat in structura globala de thread-ul care le-a creat.
-    - Am decis ca sunt prea multe thread-uri create si nu este profitabil din punct de vedere al performantei deoarece se pierdea mult prea mult timp cu crearea acestora. Astfel am ales sa creem doar NUM_THREADS dat ca parametru programului care sa obtina job-uri dintr-un pool in care thread-ul principal adauga.
-      - Se vor sincroniza thread-urile care executa job-urile astfel:
-        - Cu o bariera - se asteapta incheierea tuturor job-urilor pentru a putea agrega rezultatele si alege mutarea cea mai favorabila ( in thread-ul principa )
-        - Cu un mutex si un broadcast la variabila conditie - se asigura accessul la pool a unui singur thread la un moment de timp pentru obtinerea unui job
-}}}
-
-
-Analiza scalabilitate a fost realizata pe cluster-ul facultatii, pe hp-sl si pe ibm-dp folosind sistemul de batch. Rezultatele pentru omp, pthreads, mpi, hybrid (omp + mpi) raportate la varianta seriala (pe un singur thread) sunt urmatoarele:
-
-Pentru hp-sl:
-{{{
-#!html
+Pentru **hp-sl**:
 <img src="https://raw.githubusercontent.com/razvanalex/MCTS-GO/master/Scalability/performance-hp-sl.png" />
 <img src="https://raw.githubusercontent.com/razvanalex/MCTS-GO/master/Scalability/scalability-hp-sl.png" />
 <img src="https://raw.githubusercontent.com/razvanalex/MCTS-GO/master/Scalability/efficiency-hp-sl.png" />
-}}}
 
-Pentru ibm-dp:
-{{{
-#!html
+Pentru **ibm-dp**:
 <img src="https://raw.githubusercontent.com/razvanalex/MCTS-GO/master/Scalability/performance-ibm-dp.png" />
 <img src="https://raw.githubusercontent.com/razvanalex/MCTS-GO/master/Scalability/scalability-ibm-dp.png" />
 <img src="https://raw.githubusercontent.com/razvanalex/MCTS-GO/master/Scalability/efficiency-ibm-dp.png" />
-}}}
 
-Nota: varianta hibrida utilizeaza 2 threaduri OMP si numar variabil de procese MPI. In grafice, s-a ilustrat 2 * nr_procese = numar de threaduri.
+**Nota:** Varianta hibrida utilizeaza 2 threaduri OMP si numar variabil de procese MPI. In grafice, s-a ilustrat `2 * nr_procese = numar de threaduri` (din acest motiv graficul pentru hybrid este decalat).
 
-Analiza a fost facuta pentru legea lui Gustafson (care ia in calcul cantitatea de munca realizata pe numarul de fire de executie). Din acest motiv, se justifica graficele liniare pentru scalabilitate (avem weak scaling pentru aceasta problema: mai multe fire de executie realizeaza simulari intr-o perioada de timp specificata).
+Analiza a fost facuta in concordanta cu legea lui Gustafson (care ia in calcul cantitatea de munca realizata pe numarul de fire de executie). Din acest motiv, se justifica graficele liniare pentru scalabilitate (avem weak scaling pentru aceasta problema: mai multe fire de executie realizeaza simulari intr-o perioada de timp specificata).
 
-Se poate observa ca variantele care folosesc doar threaduri (omp si pthreads) nu scaleaza conform asteptarilor, acest lucru fiind datorat fenomenului de 'false cache sharing'. Exista date care sunt partajate intre threaduri (precum starea curenta, arborii de cautare etc) si acest lucru influenteaza dramatic performantele (intrucat cache-ul se invalideaza foarte des si avem un bottleneck de memorie). Acest lucru este accentuat prin faptul ca in varianta de MPI aceasta problema nu apare (fiecare proces are zona sa de memorie, iar transmiterea datelor se face prin mecanismele din MPI). Varianta hibrida este undeva intre MPI si omp/pthreads.
-Intre pthreads si openMP este o diferenta foarte mica, fiind putin mai eficienta varianta cu pthreads.
+Se poate observa ca variantele care folosesc doar threaduri (OpenMP si PThreads) nu scaleaza conform asteptarilor, acest lucru fiind datorat fenomenului de 'false cache sharing'. Exista date care sunt partajate intre threaduri (precum starea curenta, arborii de cautare etc) si acest lucru influenteaza dramatic performantele (intrucat cache-ul se invalideaza foarte des si avem un bottleneck de memorie). Acest lucru este accentuat prin faptul ca in varianta de MPI aceasta problema nu apare (fiecare proces are zona sa de memorie, iar transmiterea datelor se face prin mecanismele din MPI). Varianta hibrida este undeva intre MPI si OpenMP/PThreads.
+
+Intre PThreads si OpenMP este o diferenta foarte mica, fiind putin mai eficienta varianta cu pthreads.
 Scalarea este una liniara, iar dupa un punct, odata cu cresterea numarului de threaduri (in cazul de fata, dupa 16 pentru hybrid si 8 pt MPI) speedup-ul se plafoneaza. Acest lucru se datoreaza si capabilitatilor hardware disponibile pe cele doua platforme.
 
+
+### Concluzii proiect
+In urma acestui proiect am vazut cum se poate paraleliza un cod serial (desigur, daca acesta poate fi paralelizat), am vazut ca nu numai legea lui Amdahl este importanta; depide foarte mult de aplicatie daca aceasta merge sa fie **weak scaling** sau **strong scaling** si ca este foarte importanta arhitectura hardware pe care rulezi aplicatie. Am vazut ca pe cluster se obtin anumite rezultate, iar pe masina locala rezulatele sunt mai bune (chiar daca nu se poate rula pe mai multe fire de executie fata de cluster). De asemenea, si intre clustere am observat diferente destul de semnificative: `hp-sl` pare sa se preteze mai bine pe acest gen de workload decat `ibm-dp`. In plus, am invatat cum se utilizeaza utilitare de profiling pt sisteme paralele si distribuite (in acest caz, unelte oferite de Intel).
+
+Problema scaleaza pe mai multe procesoare destul de bine (creste puterea de calcul; **weak scaling**), dar depinde foarte mult de arhitectura pe care ruleaza si de modul de optimizare si de scriere de cod.
 
 
 ### Resurse:
 [1] https://storage.googleapis.com/deepmind-media/alphago/AlphaGoNaturePaper.pdf  
 [2] https://pdfs.semanticscholar.org/a8fc/4fe88d984348723e282653697970935ccbac.pdf  
-[3] https://github.com/razvanalex/MCTS-GO/blob/master/Parallel%20Monte-Carlo%20Tree%20Search.pdf
-
+[3] https://github.com/razvanalex/MCTS-GO/blob/master/Parallel%20Monte-Carlo%20Tree%20Search.pdf  
+[4] https://www.boost.org/
