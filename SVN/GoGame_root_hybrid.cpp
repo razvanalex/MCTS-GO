@@ -3,6 +3,7 @@
 #include <ctime>
 #include <iostream>
 #include <mpi.h>
+#include <omp.h>
 #include <string>
 #include <sys/resource.h>
 #include <sys/time.h>
@@ -22,16 +23,18 @@
 
 using namespace std;
 
-#define VISUAL 1 // For visualizing the game
-#define LOG 0    // For printing the average time
+#define OMP_NUM_THREADS 2 // Don't beef it up too much
 
-#define RANDOM_PLAY 1 // 1 = Random simulation
+#define VISUAL              0   // For visualizing the game
+#define LOG                 1   // For printing the average time
 
-#define USE_TIME_ROUND 1   // 1 = Use time; 0 = Use iterations
-#define TIME_PER_ROUND 0.5 // In seconds
+#define RANDOM_PLAY         0   // 1 = Random simulation
 
-#define USE_TIME_SIM 1    // 1 = Use time; 0 = Use iterations
-#define TIME_PER_SIM 0.05 // In seconds
+#define USE_TIME_ROUND      1   // 1 = Use time; 0 = Use iterations
+#define TIME_PER_ROUND      0.5   // In seconds
+
+#define USE_TIME_SIM        1   // 1 = Use time; 0 = Use iterations
+#define TIME_PER_SIM        0.05 // In seconds
 
 /**
  * Measures the time.
@@ -642,9 +645,15 @@ void manual_play(Position *s) {
     }
 }
 
+/* Total number of games, rounds and steps played */
+unsigned long total_num_games = 0;
+unsigned long total_num_rounds = 0;
+unsigned long total_num_steps = 0;
+
 /* The trees used in MCTS. It is a pair of (state, score) */
 unordered_map<Position, value *> trees[2];
 unordered_map<Position, value *> *localTrees;
+unordered_map<Position, value *> ompTrees[OMP_NUM_THREADS];
 
 /**
  * This is a generic function that broadcasts the data of a class that is 
@@ -681,7 +690,7 @@ void broadcast(Type &data, int root) {
  * @param playout_num The number of simulations in MCTS.
  * @returns A new state after choosing a move.
  */
-Position *mcts_play(Position *s, int iters, int playout_num, unordered_map<Position, value *> &tree, int threadIndex, int thread_num) {
+Position *mcts_play(Position *s, float iters, float playout_num, unordered_map<Position, value *> tree, int threadIndex, int thread_num) {
     int my_player = s->player;
 
     // The player cannot put a stone. Pass move!
@@ -690,251 +699,279 @@ Position *mcts_play(Position *s, int iters, int playout_num, unordered_map<Posit
         return s;
     }
 
-    unordered_map<Position, value *> localTree = tree;
-    Position *s_local = new Position(*s);
+    #pragma omp parallel  \
+        reduction(+: total_num_games) \
+        reduction(+: total_num_rounds) \
+        reduction(+: total_num_steps)
+    {
+        int ompThreadIdx = omp_get_thread_num();
+        unordered_map<Position, value *> localTree = tree;
+        Position *s_local = new Position(*s);
+    
+        // If 's' (current state) is not in the tree, create the state
+        if (localTree.find(*s_local) == localTree.end()) {
+            // Create a linked-list for game scores
+            localTree[*s_local] = new value(NULL, 0, 0);
 
-    // If 's' (current state) is not in the tree, create the state
-    if (localTree.find(*s_local) == localTree.end()) {
-        // Create a linked-list for game scores
-        localTree[*s_local] = new value(NULL, 0, 0);
-
-        // Get the available moves
-        vector<Position> next_pos;
-        get_next_pos(s_local, next_pos);
-
-        // For every move, check if the state exists in the tree then update
-        // the scores for current state
-        value *v = localTree[*s_local];
-        for (int i = 0; i < next_pos.size(); ++i) {
-            if (localTree.find(next_pos[i]) != localTree.end()) {
-                v->total_game += localTree[next_pos[i]]->total_game;
-                v->total_win += localTree[next_pos[i]]->total_win;
-            }
-        }
-    }
-
-    bool all_in;
-    value *root_v = localTree[*s_local];
-    Position *t;
-
-    // Run the game 'iters' times
-#if USE_TIME_ROUND
-    double time1_round, time2_round, time_cpu;
-    timing(&time1_round, &time_cpu);
-    do {
-#else
-    for (int i = 0; i < iters; ++i) {
-#endif
-        t = s_local;
-
-        // Selection
-        while (!t->game_over()) {
-            all_in = true; // all child nodes are expanded
-
-            // Get next moves
+            // Get the available moves
             vector<Position> next_pos;
-            get_next_pos(t, next_pos);
+            get_next_pos(s_local, next_pos);
 
-            // Search the first move from that is not in the existing tree.
-            // Also, if one move not found, set all_in to false
-            int index = 0;
-            for (int j = 0; j < next_pos.size(); ++j) {
-                if (localTree.find(next_pos[j]) == localTree.end()) {
-                    all_in = false;
-                    index = j;
-                    break;
+            // For every move, check if the state exists in the tree then update
+            // the scores for current state
+            value *v = localTree[*s_local];
+            for (int i = 0; i < next_pos.size(); ++i) {
+                if (localTree.find(next_pos[i]) != localTree.end()) {
+                    v->total_game += localTree[next_pos[i]]->total_game;
+                    v->total_win += localTree[next_pos[i]]->total_win;
                 }
-            }
-
-            // If all_in then tree policy else expand (create a new node) and break
-            if (all_in == false) {
-                // Explore new state
-                localTree[next_pos[index]] = new value(localTree[*t], 0.0, 0.0);
-                t = new Position(next_pos[index]);
-                break;
-            } else {
-                // All child nodes are visited. Find the best current children,
-                // UCTS strategy
-                double z = 0.2;
-                value *v = localTree[*t];
-                double T = v->total_game;
-                Position *tmp_pos = NULL;
-                int best_row, best_col;
-
-                // Select next child
-                if (t->player == my_player) {
-                    // For my_player, select the child that maximizes the score
-                    double ucb = -10000000000000.0;
-                    for (int j = 0; j < next_pos.size(); ++j) {
-                        value *vv = localTree[next_pos[j]];
-                        double pj = vv->total_win;
-                        double nj = vv->total_game;
-                        double tmp_ucb = pj / nj + sqrt(z * log(T) / nj);
-
-                        if (ucb < tmp_ucb) {
-                            ucb = tmp_ucb;
-                            tmp_pos = &next_pos[j];
-                        }
-                    }
-                } else {
-                    // For the other player, select the child that minimizes the score
-                    double ucb = 10000000000000.0;
-                    for (int j = 0; j < next_pos.size(); ++j) {
-                        value *vv = localTree[next_pos[j]];
-                        double pj = vv->total_win;
-                        double nj = vv->total_game;
-                        double tmp_ucb = pj / nj - sqrt(z * log(T) / nj);
-
-                        if (ucb > tmp_ucb) {
-                            ucb = tmp_ucb;
-                            tmp_pos = &next_pos[j];
-                        }
-                    }
-                }
-
-                // Add to linked-list, the parent value
-                localTree[*tmp_pos]->last_pos_value = v;
-                if (t != s_local)
-                    delete t;
-
-                // Go to next state
-                t = new Position(*tmp_pos);
             }
         }
 
-        // Playout policy: Run some random games and obtain some scores
-        double total_g = 0, total_w = 0;
-        if (t->game_over()) {
-            // 't' is a final state, just update the scores
-            if (t->who_win() == my_player) {
-                total_g = playout_num;
-                total_w = playout_num;
-            } else if (t->who_win() == 0) {
-                total_g = playout_num;
-                total_w = playout_num / 2.0;
-            } else {
-                total_g = playout_num;
-                total_w = 0;
-            }
-        } else {
-            // Run simulations 'playout_num' times
-#if USE_TIME_SIM
-            double time1_sim, time2_sim, time_cpu;
-            timing(&time1_sim, &time_cpu);
-            do {
-#else
-            for (int j = 0; j < playout_num; ++j) {
-#endif
-                Position *tt = new Position(*t);
-                // Run a random simulation
-                int steps = 0;
+        bool all_in;
+        value *root_v = localTree[*s_local];
+        Position *t;
 
-                while (!tt->game_over()) {
-                    steps++;
+        // Run the game 'iters' times
+    #if USE_TIME_ROUND
+        double time1_round, time2_round, time_cpu;
+        timing(&time1_round, &time_cpu);
+        do {
+    #else
+        #pragma omp for schedule(dynamic)
+        for (int i = 0; i < iters; ++i) {
+    #endif
+            t = s_local;
+            total_num_rounds++;
 
-                    if (!tt->is_pass()) {
-                        int x = 0, y = 0;
-#if RANDOM_PLAY
-                        do {
-                            x = rand() % 9;
-                            y = rand() % 9;
-                        } while (tt->make_move(x, y) == -1);
-#else
-                        do {
-                            x++;
-                            if (x == 9) {
-                                x = 0;
-                                y++;
-                            }
-                            y %= 9;
-                        } while (tt->make_move(x, y) == -1);
-#endif
-                    } else {
-                        tt->pass_move();
-                    }
+            // Selection
+            while (!t->game_over()) {
+                all_in = true; // all child nodes are expanded
 
-                    if (steps == 5000) {
-                        cout << "STUKED!" << endl;
-                        tt->print();
+                // Get next moves
+                vector<Position> next_pos;
+                get_next_pos(t, next_pos);
+
+                // Search the first move from that is not in the existing tree.
+                // Also, if one move not found, set all_in to false
+                int index = 0;
+                for (int j = 0; j < next_pos.size(); ++j) {
+                    if (localTree.find(next_pos[j]) == localTree.end()) {
+                        all_in = false;
+                        index = j;
                         break;
                     }
                 }
 
-                // Update the scores based on the result of the last game
-                if (tt->who_win() == my_player) {
-                    total_g += 1;
-                    total_w += 1;
-                } else if (tt->who_win() == 0) {
-                    total_g += 1;
-                    total_w += 0.5;
+                // If all_in then tree policy else expand (create a new node) and break
+                if (all_in == false) {
+                    // Explore new state
+                    localTree[next_pos[index]] = new value(localTree[*t], 0.0, 0.0);
+                    t = new Position(next_pos[index]);
+                    break;
                 } else {
-                    total_g += 1;
-                    total_w += 0;
+                    // All child nodes are visited. Find the best current children,
+                    // UCTS strategy
+                    double z = 0.2;
+                    value *v = localTree[*t];
+                    double T = v->total_game;
+                    Position *tmp_pos = NULL;
+                    int best_row, best_col;
+
+                    // Select next child
+                    if (t->player == my_player) {
+                        // For my_player, select the child that maximizes the score
+                        double ucb = -10000000000000.0;
+                        for (int j = 0; j < next_pos.size(); ++j) {
+                            value *vv = localTree[next_pos[j]];
+                            double pj = vv->total_win;
+                            double nj = vv->total_game;
+                            double tmp_ucb = pj / nj + sqrt(z * log(T) / nj);
+
+                            if (ucb < tmp_ucb) {
+                                ucb = tmp_ucb;
+                                tmp_pos = &next_pos[j];
+                            }
+                        }
+                    } else {
+                        // For the other player, select the child that minimizes the score
+                        double ucb = 10000000000000.0;
+                        for (int j = 0; j < next_pos.size(); ++j) {
+                            value *vv = localTree[next_pos[j]];
+                            double pj = vv->total_win;
+                            double nj = vv->total_game;
+                            double tmp_ucb = pj / nj - sqrt(z * log(T) / nj);
+
+                            if (ucb > tmp_ucb) {
+                                ucb = tmp_ucb;
+                                tmp_pos = &next_pos[j];
+                            }
+                        }
+                    }
+
+                    // Add to linked-list, the parent value
+                    localTree[*tmp_pos]->last_pos_value = v;
+                    if (t != s_local)
+                        delete t;
+
+                    // Go to next state
+                    t = new Position(*tmp_pos);
                 }
-                delete tt;
-#if USE_TIME_SIM
-                    timing(&time2_sim, &time_cpu);
-                } while (time2_sim - time1_sim < TIME_PER_SIM);
-#else
-                }
-#endif
             }
 
-        // Back propagate the result (up to 500 levels of the tree)
-        value *v_ = localTree[*t];
-        v_->total_game += total_g;
-        v_->total_win += total_w;
-        int loop_num = 0;
+            // Playout policy: Run some random games and obtain some scores
+            double total_g = 0, total_w = 0;
+            if (t->game_over()) {
+                // 't' is a final state, just update the scores
+                if (t->who_win() == my_player) {
+                    total_g = playout_num;
+                    total_w = playout_num;
+                } else if (t->who_win() == 0) {
+                    total_g = playout_num;
+                    total_w = playout_num / 2.0;
+                } else {
+                    total_g = playout_num;
+                    total_w = 0;
+                }
+            } else {
+                // Run simulations 'playout_num' times
+    #if USE_TIME_SIM
+                double time1_sim, time2_sim, time_cpu;
+                timing(&time1_sim, &time_cpu);
+                do {
+    #else
+                for (int j = 0; j < playout_num; ++j) {
+    #endif
+                    Position *tt = new Position(*t);
+                    // Run a random simulation
+                    int steps = 0;
+                    total_num_games++;
 
-        while (v_ != root_v && loop_num++ < 500) {
-            v_ = v_->last_pos_value;
+                    while (!tt->game_over()) {
+                        total_num_steps++; 
+                        steps++;
+
+                        if (!tt->is_pass()) {
+                            int x = 0, y = 0;
+    #if RANDOM_PLAY
+                            do {
+                                x = rand() % 9;
+                                y = rand() % 9;
+                            } while (tt->make_move(x, y) == -1);
+    #else
+                            do {
+                                x++;
+                                if (x == 9) {
+                                    x = 0;
+                                    y++;
+                                }
+                                y %= 9;
+                            } while (tt->make_move(x, y) == -1);
+    #endif
+                        } else {
+                            tt->pass_move();
+                        }
+
+                        if (steps == 5000) {
+#if VISUAL
+                            cout << "STUKED!" << endl;
+                            tt->print();
+#endif
+                            break;
+                        }
+                    }
+
+                    // Update the scores based on the result of the last game
+                    if (tt->who_win() == my_player) {
+                        total_g += 1;
+                        total_w += 1;
+                    } else if (tt->who_win() == 0) {
+                        total_g += 1;
+                        total_w += 0.5;
+                    } else {
+                        total_g += 1;
+                        total_w += 0;
+                    }
+                    delete tt;
+    #if USE_TIME_SIM
+                        timing(&time2_sim, &time_cpu);
+                    } while (time2_sim - time1_sim < playout_num);
+    #else
+                    }
+    #endif
+                }
+
+            // Back propagate the result (up to 500 levels of the tree)
+            value *v_ = localTree[*t];
             v_->total_game += total_g;
             v_->total_win += total_w;
+            int loop_num = 0;
+
+            while (v_ != root_v && loop_num++ < 500) {
+                v_ = v_->last_pos_value;
+                v_->total_game += total_g;
+                v_->total_win += total_w;
+            }
+            delete t;
+
+    #if USE_TIME_ROUND
+            timing(&time2_round, &time_cpu);
+        } while (time2_round - time1_round < iters);
+    #else
+        }
+    #endif
+
+    ompTrees[ompThreadIdx].clear();
+    ompTrees[ompThreadIdx] = localTree;
+
+    }
+
+    for (int ompTID = 0; ompTID < OMP_NUM_THREADS; ompTID++) {
+            if (threadIndex == 0) {
+                localTrees[threadIndex * OMP_NUM_THREADS + ompTID] = ompTrees[ompTID];
         }
 
- #if USE_TIME_ROUND
-        timing(&time2_round, &time_cpu);
-    } while (time2_round - time1_round < TIME_PER_ROUND);
-#else
-    }
-#endif
+        if (threadIndex != 0) {
+            string serial_str;
 
-    if (threadIndex != 0) {
-        string serial_str;
-        boost::iostreams::back_insert_device<std::string> inserter(serial_str);
-        boost::iostreams::stream<boost::iostreams::back_insert_device<std::string>> s(inserter);
-        boost::archive::binary_oarchive send_ar(s);
+            boost::iostreams::back_insert_device<std::string> inserter(serial_str);
+            boost::iostreams::stream<boost::iostreams::back_insert_device<std::string>> s(inserter);
+            boost::archive::binary_oarchive send_ar(s);
 
-        send_ar << localTree;
-        s.flush();
+            send_ar << ompTrees[ompTID];
+            s.flush();
 
-        int len = serial_str.size();
+            int len = serial_str.size();
 
-        MPI_Send(&len, 1, MPI_INT, 0, 0, MPI_COMM_WORLD);
-        MPI_Send((void *)serial_str.data(), len, MPI_BYTE, 0, 1, MPI_COMM_WORLD);
+            int tag = threadIndex * OMP_NUM_THREADS + ompTID;
+            MPI_Send(&len, 1, MPI_INT, 0, tag, MPI_COMM_WORLD);
+            MPI_Send((void *)serial_str.data(), len, MPI_BYTE, 0, tag + 1, MPI_COMM_WORLD);
 
-    } else {
-        localTrees[threadIndex] = localTree;
-    }
+        } 
+    }  
 
     if (threadIndex == 0) {
         for (int tid = 0; tid < thread_num; tid++) {
             if (tid == 0)
                 continue;
 
-            int len;
-            MPI_Recv(&len, 1, MPI_INT, tid, 0, MPI_COMM_WORLD, MPI_STATUS_IGNORE);
+            for (int ompTID = 0; ompTID < OMP_NUM_THREADS; ompTID++) {
+                int tag = tid * OMP_NUM_THREADS + ompTID;
+                int len = 0;
 
-            char serial_str[len + 1];
-            MPI_Recv(serial_str, len, MPI_BYTE, tid, 1, MPI_COMM_WORLD, MPI_STATUS_IGNORE);
-            serial_str[len] = '\0';
+                MPI_Recv(&len, 1, MPI_INT, tid, tag, MPI_COMM_WORLD, MPI_STATUS_IGNORE);
+                
+                char serial_str[len + 1];
+                MPI_Recv(serial_str, len, MPI_BYTE, tid, tag + 1, MPI_COMM_WORLD, MPI_STATUS_IGNORE);
+                serial_str[len] = '\0';
 
-            boost::iostreams::basic_array_source<char> device(serial_str, len);
-            boost::iostreams::stream<boost::iostreams::basic_array_source<char>> s1(device);
-            boost::archive::binary_iarchive recv_ar(s1);
+                boost::iostreams::basic_array_source<char> device(serial_str, len);
+                boost::iostreams::stream<boost::iostreams::basic_array_source<char>> s1(device);
+                boost::archive::binary_iarchive recv_ar(s1);
 
-            localTrees[tid].clear();
-            recv_ar >> localTrees[tid];
+                localTrees[tag].clear();
+                recv_ar >> localTrees[tag];
+            }
         }
 
         // Merge local trees to global trees
@@ -981,25 +1018,38 @@ Position *mcts_play(Position *s, int iters, int playout_num, unordered_map<Posit
 int main(int argc, char **argv) {
     srand(time(0));
 
-    Position *s = new Position();
     double times1[2];
     double times2[2];
     int round_num = 0;
-    int playout_num, iteration, thread_num;
+    int thread_num;
+    float playout_num, iteration;
+
+    /* Initialize MPI */
+    MPI_Init(&argc, &argv);
+    MPI_Comm_size(MPI_COMM_WORLD, &thread_num);
+
+    Position *s = new Position();
+
+    omp_set_num_threads(OMP_NUM_THREADS);
 
     if (argc != 3) {
-        cout << "usage: <iteration> <playout_num>" << endl;
+        cout << "usage: <iteration/time_round> <playout_num/time_sim>" << endl;
         return 0;
     }
 
+#if USE_TIME_ROUND
+    iteration = atof(argv[1]);
+#else
     iteration = atoi(argv[1]);
+#endif
+
+#if USE_TIME_SIM
+    playout_num = atof(argv[2]);
+#else
     playout_num = atoi(argv[2]);
+#endif
 
-    /* Initialize MPI */
-    MPI_Init(NULL, NULL);
-    MPI_Comm_size(MPI_COMM_WORLD, &thread_num);
-
-    localTrees = new unordered_map<Position, value *>[thread_num];
+    localTrees = new unordered_map<Position, value *>[thread_num * OMP_NUM_THREADS];
 
     int threadIndex = 0;
     MPI_Comm_rank(MPI_COMM_WORLD, &threadIndex);
@@ -1017,8 +1067,6 @@ int main(int argc, char **argv) {
             cout << "========== Player 1 ==========" << endl;
         }
 #endif
-
-        // MPI_Barrier(MPI_COMM_WORLD);
         s = mcts_play(s, iteration, playout_num, trees[0], threadIndex, thread_num);
 
 #if VISUAL
@@ -1033,8 +1081,6 @@ int main(int argc, char **argv) {
         if (threadIndex == 0)
             cout << "========== Player 2 ==========" << endl;
 #endif
-
-        // MPI_Barrier(MPI_COMM_WORLD);
         s = mcts_play(s, iteration, playout_num, trees[1], threadIndex, thread_num);
 
 #if VISUAL
@@ -1044,16 +1090,46 @@ int main(int argc, char **argv) {
     }
 
 #if LOG
+    timing(times2, times2 + 1);
+
+    unsigned long global_total_num_games = 0;
+    unsigned long global_total_num_rounds = 0;
+    unsigned long global_total_num_steps = 0;
+
+    MPI_Reduce(&total_num_games, &global_total_num_games, 1, MPI_UNSIGNED_LONG, MPI_SUM, 0, MPI_COMM_WORLD);
+    MPI_Reduce(&total_num_rounds, &global_total_num_rounds, 1, MPI_UNSIGNED_LONG, MPI_SUM, 0, MPI_COMM_WORLD);
+    MPI_Reduce(&total_num_steps, &global_total_num_steps, 1, MPI_UNSIGNED_LONG, MPI_SUM, 0, MPI_COMM_WORLD);
+
     if (threadIndex == 0) {
-        timing(times2, times2 + 1);
-        cout << "Average time of one step: " << (times2[0] - times1[0]) / round_num << "s." << endl;
+        cout << endl << "==== Game finished ====" << endl;
+        cout << "Number of rounds played: " << round_num << endl;
+        cout << "Total number of simulated games: " << global_total_num_games << " " << endl;
+        cout << "Total number of simulated rounds: " << global_total_num_rounds << " " << endl;
+        cout << "Total number of simulated steps: " << global_total_num_steps << " " << endl;
+        cout << endl;
+        cout << "Total time (seconds): " << times2[0] - times1[0] << endl;
+        cout << "Average time for one round (seconds): " << (times2[0] - times1[0]) / round_num << endl;
+        cout << endl;
     }
 #endif
-    MPI_Finalize();
 
     // Release memory
+    for (int i = 0; i < thread_num; i++) {
+        auto tree = localTrees[i];
+        for (auto it = tree.begin(); it != tree.end();) {
+            delete it->second;
+            it = tree.erase(it);
+        }
+    }
     delete[] localTrees;
     delete s;
-
+    for (auto tree : trees) {
+        for (auto it = tree.begin(); it != tree.end();) {
+            delete it->second;
+            it = tree.erase(it);
+        }
+    }
+    
+    MPI_Finalize();
     return 0;
 }

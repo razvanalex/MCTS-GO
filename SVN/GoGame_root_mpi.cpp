@@ -22,16 +22,16 @@
 
 using namespace std;
 
-#define VISUAL 1 // For visualizing the game
-#define LOG 0    // For printing the average time
+#define VISUAL              0   // For visualizing the game
+#define LOG                 1   // For printing the average time
 
-#define RANDOM_PLAY 1 // 1 = Random simulation
+#define RANDOM_PLAY         0   // 1 = Random simulation
 
-#define USE_TIME_ROUND 1   // 1 = Use time; 0 = Use iterations
-#define TIME_PER_ROUND 0.5 // In seconds
+#define USE_TIME_ROUND      1   // 1 = Use time; 0 = Use iterations
+#define TIME_PER_ROUND      0.5   // In seconds
 
-#define USE_TIME_SIM 1    // 1 = Use time; 0 = Use iterations
-#define TIME_PER_SIM 0.05 // In seconds
+#define USE_TIME_SIM        1   // 1 = Use time; 0 = Use iterations
+#define TIME_PER_SIM        0.05 // In seconds
 
 /**
  * Measures the time.
@@ -642,6 +642,11 @@ void manual_play(Position *s) {
     }
 }
 
+/* Total number of games, rounds and steps played */
+unsigned long total_num_games = 0;
+unsigned long total_num_rounds = 0;
+unsigned long total_num_steps = 0;
+
 /* The trees used in MCTS. It is a pair of (state, score) */
 unordered_map<Position, value *> trees[2];
 unordered_map<Position, value *> *localTrees;
@@ -681,13 +686,13 @@ void broadcast(Type &data, int root) {
  * @param playout_num The number of simulations in MCTS.
  * @returns A new state after choosing a move.
  */
-Position *mcts_play(Position *s, int iters, int playout_num, unordered_map<Position, value *> &tree, int threadIndex, int thread_num) {
+Position *mcts_play(Position *s, float iters, float playout_num, unordered_map<Position, value *> &tree, int threadIndex, int thread_num) {
     int my_player = s->player;
 
     // The player cannot put a stone. Pass move!
     if (s->is_pass()) {
         s->pass_move();
-        return s;
+        return s; 
     }
 
     unordered_map<Position, value *> localTree = tree;
@@ -726,6 +731,7 @@ Position *mcts_play(Position *s, int iters, int playout_num, unordered_map<Posit
     for (int i = 0; i < iters; ++i) {
 #endif
         t = s_local;
+        total_num_rounds++;
 
         // Selection
         while (!t->game_over()) {
@@ -828,8 +834,10 @@ Position *mcts_play(Position *s, int iters, int playout_num, unordered_map<Posit
                 Position *tt = new Position(*t);
                 // Run a random simulation
                 int steps = 0;
+                total_num_games++;
 
                 while (!tt->game_over()) {
+                    total_num_steps++;
                     steps++;
 
                     if (!tt->is_pass()) {
@@ -854,8 +862,10 @@ Position *mcts_play(Position *s, int iters, int playout_num, unordered_map<Posit
                     }
 
                     if (steps == 5000) {
+#if VISUAL
                         cout << "STUKED!" << endl;
                         tt->print();
+#endif
                         break;
                     }
                 }
@@ -874,7 +884,7 @@ Position *mcts_play(Position *s, int iters, int playout_num, unordered_map<Posit
                 delete tt;
 #if USE_TIME_SIM
                     timing(&time2_sim, &time_cpu);
-                } while (time2_sim - time1_sim < TIME_PER_SIM);
+                } while (time2_sim - time1_sim < playout_num);
 #else
                 }
 #endif
@@ -891,10 +901,11 @@ Position *mcts_play(Position *s, int iters, int playout_num, unordered_map<Posit
             v_->total_game += total_g;
             v_->total_win += total_w;
         }
+        delete t;
 
  #if USE_TIME_ROUND
         timing(&time2_round, &time_cpu);
-    } while (time2_round - time1_round < TIME_PER_ROUND);
+    } while (time2_round - time1_round < iters);
 #else
     }
 #endif
@@ -980,24 +991,35 @@ Position *mcts_play(Position *s, int iters, int playout_num, unordered_map<Posit
 
 int main(int argc, char **argv) {
     srand(time(0));
-
-    Position *s = new Position();
+    
     double times1[2];
     double times2[2];
     int round_num = 0;
-    int playout_num, iteration, thread_num;
+    int thread_num;
+    float playout_num, iteration;
+
+    /* Initialize MPI */
+    MPI_Init(&argc, &argv);
+    MPI_Comm_size(MPI_COMM_WORLD, &thread_num);
+
+    Position *s = new Position();
 
     if (argc != 3) {
-        cout << "usage: <iteration> <playout_num>" << endl;
+        cout << "usage: <iteration/time_round> <playout_num/time_sim>" << endl;
         return 0;
     }
 
+#if USE_TIME_ROUND
+    iteration = atof(argv[1]);
+#else
     iteration = atoi(argv[1]);
-    playout_num = atoi(argv[2]);
+#endif
 
-    /* Initialize MPI */
-    MPI_Init(NULL, NULL);
-    MPI_Comm_size(MPI_COMM_WORLD, &thread_num);
+#if USE_TIME_SIM
+    playout_num = atof(argv[2]);
+#else
+    playout_num = atoi(argv[2]);
+#endif
 
     localTrees = new unordered_map<Position, value *>[thread_num];
 
@@ -1044,16 +1066,46 @@ int main(int argc, char **argv) {
     }
 
 #if LOG
+    timing(times2, times2 + 1);
+
+    unsigned long global_total_num_games = 0;
+    unsigned long global_total_num_rounds = 0;
+    unsigned long global_total_num_steps = 0;
+
+    MPI_Reduce(&total_num_games, &global_total_num_games, 1, MPI_UNSIGNED_LONG, MPI_SUM, 0, MPI_COMM_WORLD);
+    MPI_Reduce(&total_num_rounds, &global_total_num_rounds, 1, MPI_UNSIGNED_LONG, MPI_SUM, 0, MPI_COMM_WORLD);
+    MPI_Reduce(&total_num_steps, &global_total_num_steps, 1, MPI_UNSIGNED_LONG, MPI_SUM, 0, MPI_COMM_WORLD);
+
     if (threadIndex == 0) {
-        timing(times2, times2 + 1);
-        cout << "Average time of one step: " << (times2[0] - times1[0]) / round_num << "s." << endl;
+        cout << endl << "==== Game finished ====" << endl;
+        cout << "Number of rounds played: " << round_num << endl;
+        cout << "Total number of simulated games: " << global_total_num_games << " " << endl;
+        cout << "Total number of simulated rounds: " << global_total_num_rounds << " " << endl;
+        cout << "Total number of simulated steps: " << global_total_num_steps << " " << endl;
+        cout << endl;
+        cout << "Total time (seconds): " << times2[0] - times1[0] << endl;
+        cout << "Average time for one round (seconds): " << (times2[0] - times1[0]) / round_num << endl;
+        cout << endl;
     }
 #endif
-    MPI_Finalize();
 
     // Release memory
+    for (int i = 0; i < thread_num; i++) {
+        auto tree = localTrees[i];
+        for (auto it = tree.begin(); it != tree.end();) {
+            delete it->second;
+            it = tree.erase(it);
+        }
+    }
     delete[] localTrees;
     delete s;
+    for (auto tree : trees) {
+        for (auto it = tree.begin(); it != tree.end();) {
+            delete it->second;
+            it = tree.erase(it);
+        }
+    }
 
+    MPI_Finalize();
     return 0;
 }
